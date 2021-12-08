@@ -1,0 +1,48 @@
+# Compiled python modules.
+*.pyc
+
+# Setuptools distribution folder.
+/dist/
+
+# Python egg metadata, regenerated from source files by setuptools.
+/*.egg-info
+/*.egg
+
+# files with '~'
+/*~
+
+*~
+
+
+
+#cache
+.cache/
+__pycache__
+
+
+/config.ini
+.idea/
+config.ini
+
+#tests
+tests/
+
+new_requirement.txt
+/build_old/
+*.orig
+/.pypirc
+
+# os files
+.DS_Store
+
+# test - i dont trust it
+tests/*.cpg
+tests/*.dbf
+tests/*.prj
+tests/*.shp
+tests/*.shx
+tests/*.nc
+
+# more tests
+*.zip
+

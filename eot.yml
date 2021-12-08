@@ -1,0 +1,30 @@
+name: eot
+
+channels:
+  - conda-forge
+  - anaconda
+
+dependencies:
+  - python
+  - pip
+  - gdal
+  - requests
+  - geojson
+  - numpy
+  - scipy
+  - jupyter
+  - matplotlib
+  - pyproj
+  - geopandas
+  - shapely
+  - joblib
+  - tqdm
+  - earthengine-api
+  - glob2
+  - xarray
+  - geemap
+  - eemont
+
+  - pip:
+    - ContrailOnlineCAClient
+    - ftplib
