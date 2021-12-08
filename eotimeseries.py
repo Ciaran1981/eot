@@ -21,6 +21,11 @@ import json
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from itertools import chain
+import ee, eemont, geemap
+import pandas as pd
+import numpy as np
+import eeconvert
+ee.Initialize()
 
 ogr.UseExceptions()
 osr.UseExceptions()
@@ -1291,6 +1296,13 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
     
     if 'key_0' in gdf.columns:
         gdf = gdf.drop(columns=['key_0'])
+    
+    #test
+#    wcld = [_s1_tseries(geom[p],
+#                 start_date=start_date,
+#                 end_date=end_date,
+#                 orbit=orbit, stat=stat, agg=agg, polar=polar,
+#                 para=para) for p in tqdm(idx)]
       
     wcld = Parallel(n_jobs=nt, verbose=2)(delayed(_s1_tseries)(geom[p],
                     start_date=start_date,
@@ -1328,6 +1340,53 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
     
     return newdf
 
+
+def S2ts_mont(inshp, start_date, end_date):
+    
+    gdf = gpd.read_file(inshp)
+    
+    geom = eeconvert.gdfToFc(gdf)
+    
+    
+    #not working here
+    #geom = poly2dictlist(inshp, wgs84=reproj)
+    
+    # works but need to anonomise the shp first....
+    #geom = geemap.shp_to_ee(inshp)
+    
+    # I thin the feat c
+    # it doesn't like my start and end dates...
+#    S2 = (ee.ImageCollection('COPERNICUS/S2_SR')
+#   .filterBounds(geom)
+#   .filterDate(start_date, end_date)
+#   .maskClouds()
+#   .scale()
+#   .index(['EVI','NDVI']))
+    
+    S2 = (ee.ImageCollection('COPERNICUS/S2_SR')
+   .filterBounds(geom)
+   .filterDate('2016-01-01','2016-01-01')
+   .maskClouds()
+   .scale()
+   .index(['EVI','NDVI']))
+
+    # wow it works...(the first time but not since)
+    ts = S2.getTimeSeriesByRegions(reducer = [ee.Reducer.mean(),ee.Reducer.median()],
+                               collection = geom,
+                               bands = ['EVI','NDVI'],
+                               scale = 10,
+                               naValue = -99999999,
+                               dateColumn = 'my_date_colum',
+                               dateFormat = 'ms')
+    
+    # its very slow.......and very unreliable....
+    df = geemap.ee_to_pandas(ts)
+    
+    # This maybe quicker not much in it. 
+    dfoot = eeconvert.fcToGdf(ts)
+
+
+
 def gdf2ee(gdf):
     
     
@@ -1338,6 +1397,7 @@ def gdf2ee(gdf):
         jsonDict = geom.to_json()
         geojsonDict = jsonDict['features'][0] 
         features.append(ee.Feature(geojsonDict)) 
+    return features
 
     
 # make a list of features
