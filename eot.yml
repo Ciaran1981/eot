@@ -5,7 +5,7 @@ channels:
   - anaconda
 
 dependencies:
-  - python
+  - python=3
   - pip
   - gdal
   - requests
@@ -27,4 +27,7 @@ dependencies:
 
   - pip:
     - ContrailOnlineCAClient
-    - ftplib
+    - reconvert
+    - geetools
+    - geedataset
+
