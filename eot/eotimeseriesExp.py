@@ -24,7 +24,8 @@ from itertools import chain
 import ee, eemont, geemap
 import pandas as pd
 import numpy as np
-import eeconvert
+import wxee
+wxee.Initialize()
 ee.Initialize()
 
 ogr.UseExceptions()
@@ -269,9 +270,9 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
         ootds.FlushCache()
         ootds = None
     
-    outpoly = geemap.shp_to_ee(outfile)
+        geemap.shp_to_ee(outfile)
     
-    return outpoly
+    return poly.ExportToJson()
 
 
 def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
@@ -452,12 +453,14 @@ def simplify(fc):
     out = [feature2dict(x) for x in fc['features']]
     return out
         
-def _s2_tseries(geometry,  collection="COPERNICUS/S2", start_date='2016-01-01',
-               end_date='2016-12-31', dist=20, cloud_mask=True, 
-               stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False):
+def _s2_tseries(geometry,  collection="COPERNICUS/S2_SR", start_date='2016-01-01',
+               end_date='2016-12-31', dist=20, 
+               stat='max', indices=['NDVI'], para=False,
+               agg='month'):
     
     """
-    S2 Time series from a single coordinate using gee
+    S2 Time series from a single coordinate/polygon using gee
+    Clouds will be masked by default
     
     Parameters
     ----------
@@ -477,13 +480,11 @@ def _s2_tseries(geometry,  collection="COPERNICUS/S2", start_date='2016-01-01',
                     end date of time series
                     
     dist: int
-             the distance around point e.g. 20m
-             
-    cloud_mask: int
-             whether to mask cloud
-             
-    cloud_perc: int
-             the acceptable cloudiness per pixel in addition to prev arg
+             the distance around point e.g. 20m            
+
+    agg: string
+            aggregate 
+            eg month or week etc
               
     """
     # joblib hack - this is goona need to run in gee directly i think
@@ -494,15 +495,41 @@ def _s2_tseries(geometry,  collection="COPERNICUS/S2", start_date='2016-01-01',
     def _reduce_region(image):
         # cheers geeextract!   
         """Spatial aggregation function for a single image and a polygon feature"""
-        stat_dict = image.reduceRegion(fun, geometry, 30);
+        stat_dict = image.reduceRegion(fun, geometry, 10) # assume s2....
         # FEature needs to be rebuilt because the backend doesn't accept to map
         # functions that return dictionaries
         return ee.Feature(None, stat_dict)
     
-    S2 = ee.ImageCollection(collection).filterDate(start_date,
-                       end_date).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',
-                       cloud_perc))
+    # from my notebook hangs forever this way and gives mem limit issue
+    # S2 = (wxee.TimeSeries("COPERNICUS/S2_SR")
+    # .filterDate(start_date, end_date)
+    # .filterBounds(geometry))  
     
+    # S2mnt = (S2
+    #   .maskClouds()
+    #   .scale()
+    #   .spectralIndices(indices))
+    
+    # ts = wxee.TimeSeries(S2mnt).select('NDVI')
+    # ts_filled = ts.fill_gaps(3, "month", "center", reducer=ee.Reducer.median())
+    # monthly_ts_fl = ts_filled.aggregate_time(frequency="month", reducer=ee.Reducer.percentile([95]))
+    # s2list = monthly_ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
+
+    geomee = ee.Geometry.Polygon(geometry['coordinates'])
+    # The 'new' way - memory limit fail                                               
+    S2 = (ee.ImageCollection(collection)
+    .filterBounds(geometry)
+    .filterDate(start_date, end_date)
+    .maskClouds()
+    .filterBounds(geomee)
+    .spectralIndices(indices))                                                
+    #  #wxee agg - currently returns mem limit exceed....
+    tswx = wxee.TimeSeries(S2).select(indices)
+    ts_filled = tswx.fill_gaps(3, agg, "center", reducer=ee.Reducer.median())
+    #temporal agg
+    monthly_ts_fl = ts_filled.aggregate_time(frequency=agg, reducer=ee.Reducer.percentile([95]))                                                 
+                        
+    # the spatial agg
     if geometry['type'] == 'Polygon':
         
         # cheers geeextract folks 
@@ -519,20 +546,29 @@ def _s2_tseries(geometry,  collection="COPERNICUS/S2", start_date='2016-01-01',
             fun = ee.Reducer.mean()
         else:
             raise ValueError('Must be one of mean, median, max, or min')
-        geomee = ee.Geometry.Polygon(geometry['coordinates'])
+       
         
-        s2List = S2.filterBounds(geomee).map(_reduce_region).getInfo()
-        s2List = simplify(s2List)
+        # downloading the xarray get around the mem limit with the polygon
+        # though I don't get why - must be something not right in the collection
+        # processing....
+        #dsfl = monthly_ts_fl.wx.to_xarray(region=geomee, scale=20)
         
-        df = pd.DataFrame(s2List)
+        # smoothed time series
+        s2list = monthly_ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
+        # old way
+        #s2List = S2.filterBounds(geomee).map(_reduce_region).getInfo()
+        s2list = simplify(s2list)
+        
+        df = pd.DataFrame(s2list)
         
     elif geometry['type'] == 'Point':
     
         # a point
         geomee = ee.Geometry.Point(geometry['coordinates'])
         # give the point a distance to ensure we are on a pixel
-        s2list = S2.filterBounds(geomee).getRegion(geomee, dist).getInfo()
-    
+        #s2list = S2.filterBounds(geomee).getRegion(geomee, dist).getInfo()
+        s2list = monthly_ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
+        
         # the headings of the data
         cols = s2list[0]
         
@@ -547,63 +583,69 @@ def _s2_tseries(geometry,  collection="COPERNICUS/S2", start_date='2016-01-01',
     # get a proper date
     df['Date'] = df['id'].apply(_conv_date)
     
-    if cloud_mask == True:
+    # if cloud_mask == True:
         
-        # Have kept the bitwise references here
-        cloudBitMask = 1024 #1 << 10 
-        cirrusBitMask = 2048 # 1 << 11 
+    #     # Have kept the bitwise references here
+    #     cloudBitMask = 1024 #1 << 10 
+    #     cirrusBitMask = 2048 # 1 << 11 
         
-        df = df.drop(df[df.QA60 == cloudBitMask].index)
-        df = df.drop(df[df.QA60 == cirrusBitMask].index)
+    #     df = df.drop(df[df.QA60 == cloudBitMask].index)
+    #     df = df.drop(df[df.QA60 == cirrusBitMask].index)
     
-    # Don't bother as this occasionally scrubs legit values!!!    
-    # there are 2 granules - likely unfortunate loc.
-    #df = df.drop_duplicates(subset=['Date'])
+    # # Don't bother as this occasionally scrubs legit values!!!    
+    # # there are 2 granules - likely unfortunate loc.
+    # #df = df.drop_duplicates(subset=['Date'])
     
-    # ndvi whilst we are here
-    df['ndvi'] = (df['B8'] - df['B4']) / (df['B8'] + df['B4'])
+    # # ndvi whilst we are here
+    # df['ndvi'] = (df['B8'] - df['B4']) / (df['B8'] + df['B4'])
     
     # May change to this for merging below
-    df = df.set_index(df['Date'])
-    # due to the occasional bug being an object
-    if ndvi == True and bandlist == None:
-        nd = pd.to_numeric(pd.Series(df['ndvi']))
-    elif ndvi == True and bandlist != None:
-        #TODO why have done the above when it is simpler to do the below
-        bandlist.append('ndvi')
-        nd = df[bandlist]#.to_numpy()
-    elif ndvi == False and bandlist != None:
-        nd = df[bandlist]
-    # return nd
-    # may be an idea to label the 'id' as a contant val or something
-    # dump the redundant  columns
+    df = df.drop(columns=['id', 'Date'])
+    #nd = df.set_index(df['Date'])
+    # TODO multiple indices....
+    nd = pd.to_numeric(pd.Series(df[indices[0]]))
+    # # due to the occasional bug being an object
+    # if ndvi == True and bandlist == None:
+    #     nd = pd.to_numeric(pd.Series(df['ndvi']))
+    # elif ndvi == True and bandlist != None:
+    #     #TODO why have done the above when it is simpler to do the below
+    #     bandlist.append('ndvi')
+    #     nd = df[bandlist]#.to_numpy()
+    # elif ndvi == False and bandlist != None:
+    #     nd = df[bandlist]
+    # # return nd
+    # # may be an idea to label the 'id' as a contant val or something
+    # # dump the redundant  columns
     
-    # A monthly dataframe 
-    # Should be max or upper 95th looking at NDVI
-    if stat == 'max':
-        nd = nd.resample(rule='M').max()
-    if stat == 'mean':
-        nd = nd.resample(rule='M').mean()
-    if stat == 'median':
-        nd = nd.resample(rule='M').max()
-    elif stat == 'perc':
-        # avoid potential outliers
-        nd = nd.resample(rule='M').quantile(.95)
+    # # A monthly dataframe 
+    # # Should be max or upper 95th looking at NDVI
     
-    # For entry to a shapefile must be this way up
+    
+    # if stat == 'max':
+    #     nd = nd.resample(rule=agg).max()
+    # if stat == 'mean':
+    #     nd = nd.resample(rule=agg).mean()
+    # if stat == 'median':
+    #     nd = nd.resample(rule=agg).max()
+    # elif stat == 'perc':
+    #     # avoid potential outliers
+    #     nd = nd.resample(rule=agg).quantile(.95)
+    
+    # # For entry to a shapefile must be this way up
     return nd.transpose()
     
 
 # A quick/dirty answer but not an efficient one - this took almost 2mins....
 
-def S2_ts(inshp, collection="COPERNICUS/S2", reproj=False,
-          start_date='2016-01-01', end_date='2016-12-31', dist=20, cloud_mask=True, 
-               stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False, outfile=None, nt=-1,
-               ):
+def S2_ts(inshp, collection="COPERNICUS/S2_SR", reproj=False,
+          start_date='2016-01-01', end_date='2016-12-31', dist=20,  
+               stat='max', indices=['NDVI'], para=False, outfile=None, nt=-1,
+               agg='month'):
     
     
     """
-    Monthly time series from a point shapefile 
+    Monthly time series from a point shapefile or polygon
+    Cloud is masked by default, then filled with predicted values
     
     Parameters
     ----------
@@ -625,15 +667,13 @@ def S2_ts(inshp, collection="COPERNICUS/S2", reproj=False,
                     
     dist: int
              the distance around point e.g. 20m
-             
-    cloud_mask: int
-             whether to mask cloud
-             
-    cloud_perc: int
-             the acceptable cloudiness per pixel in addition to prev arg
     
     outfile: string
            the output shapefile if required
+
+    agg: string
+            aggregate 
+            eg Month or Week etc
              
              
     Returns
@@ -647,7 +687,7 @@ def S2_ts(inshp, collection="COPERNICUS/S2", reproj=False,
     This spreads the point queries client side, meaning the bottleneck is the 
     of threads you have. This is maybe 'evened out' by returning the full dataframe 
     quicker than dowloading it all from the server side and loading back into memory
-    
+
     """
     # possible to access via gpd & the usual shapely fare....
     # geom = gdf['geometry'][0]
@@ -669,41 +709,50 @@ def S2_ts(inshp, collection="COPERNICUS/S2", reproj=False,
                     collection=collection,
                     start_date=start_date,
                     end_date=end_date,
-                    stat=stat,
-                    cloud_perc=cloud_perc,
-                    cloud_mask=cloud_mask,
-                    ndvi=ndvi, 
-                    bandlist=bandlist,
-                    para=True) for p in idx) 
-    
-    if bandlist != None:
+                    stat=stat, 
+                    indices=indices,
+                    para=True,
+                    agg=agg) for p in idx) 
+
+#TODO reinstate something fro multi indices.....
+#    if bandlist != None:
         
-        #TODO There must be a more elegant/efficient way
-        listarrs = [d.to_numpy().flatten() for d in datalist]
-        finaldf = pd.DataFrame(np.vstack(listarrs))
-        del listarrs
+#        #TODO There must be a more elegant/efficient way
+#        listarrs = [d.to_numpy().flatten() for d in datalist]
+#        finaldf = pd.DataFrame(np.vstack(listarrs))
+#        del listarrs
         
-        colstmp = []
-        # this seems inefficient
-        times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-        for b in bandlist:
-            tmp = [b+"-"+ t for t in times]
-            colstmp.append(tmp)
+ #       colstmp = []
+#        # this seems inefficient
+#        times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+#        for b in bandlist:
+#            tmp = [b+"-"+ t for t in times]
+#            colstmp.append(tmp)
         # apperently quickest
-        colsfin = list(chain.from_iterable(colstmp))
+#        colsfin = list(chain.from_iterable(colstmp))
         
-        finaldf.columns = colsfin
+#        finaldf.columns = colsfin
 
         
-    else:
+#    else:
     
-        finaldf = pd.DataFrame(datalist)
-        
+    finaldf = pd.DataFrame(datalist)
+    
+    if agg == 'month':
         finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-        
-        finaldf.columns = ["nd-"+c for c in finaldf.columns]
+    else:
+        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+    
 
-    newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    finaldf.columns = ["n-"+c for c in finaldf.columns]
+    # for some reason merge no longer working due to na error when there is none
+    # hence concat. If they are in correct order no reason to worry as
+    # no index is present in the ndvi df anyway. 
+    #newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    
+    # idx must be unique so make it the gdf one
+    finaldf.index = gdf.index 
+    newdf = pd.concat([gdf, finaldf], axis=1)
     
     if outfile != None:
         newdf.to_file(outfile) # todo? driver='GPKG', layer='name')
@@ -731,7 +780,8 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
             the index of interest
             
     name: string
-            the name of interest
+            the name of interest must include the dash before the name
+            eg for ndvi by day or week it is 'n-'
             
     legend_col: string
             the column that legend lines will be labeled by
@@ -781,11 +831,12 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
             endd = '20'+endd[0:2]+'-12-31'
             dtrange = pd.date_range(start=startd, end=endd, freq=freq)
             
-#        else:
-#            startd = yrcols[0][-8:]
-#            startd = '20'+startd
-#            endd = yrcols[-1:][0][-5:]
-#            endd = '20'+endd
+        else:
+            startd = yrcols[0][-8:]
+            startd = '20'+startd
+            endd = yrcols[-1:][0][-5:]
+            endd = '20'+endd
+
 
             
     # TODO - this is crap really needs replaced....
@@ -795,7 +846,7 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     
     if freq != 'M':
         new['Date'] = new.index
-        new['Date'] = new['Date'].str.replace(name+'-','20')
+        new['Date'] = new['Date'].str.replace(name,'20')
         new['Date'] = new['Date'].str.replace('_','0')
         new['Date'] = pd.to_datetime(new['Date'])
     else:
@@ -1333,7 +1384,11 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
 
         finaldf.columns = [polar+'-'+c for c in finaldf.columns]
         
-    newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    # for some reason merge no longer working due to na error when there is none
+    # hence concat. If they are in correct order no reason to worry as
+    # no index is present in the ndvi df anyway. 
+    #newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    newdf = pd.concat([gdf, finaldf], axis=1)
     
     if outfile != None:
         newdf.to_file(outfile)
@@ -1341,51 +1396,90 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
     return newdf
 
 
-def S2ts_mont(inshp, start_date, end_date):
+def S2ts_eemont(inshp, start_date='2020-01-01', end_date='2021-01-01', 
+                col='COPERNICUS/S2_SR',  
+                bands=['NDVI'], id_field='NGFIELD', agg='M'):
+    
+    # limited by no of polygons / imcollection
+    # error occurs in conversion to pandas....
+    # either of the above can cause it eg either too many in the imcollection
+    # or too many polygons
+    
+    # it'd be better to fill the gaps server side but cannot get wxee etc. to 
+    # work with this function
     
     gdf = gpd.read_file(inshp)
     
-    geom = eeconvert.gdfToFc(gdf)
+    if 'key_0' in gdf.columns:
+        gdf = gdf.drop(columns=['key_0'])
     
-    
-    #not working here
-    #geom = poly2dictlist(inshp, wgs84=reproj)
-    
-    # works but need to anonomise the shp first....
-    #geom = geemap.shp_to_ee(inshp)
-    
-    # I thin the feat c
-    # it doesn't like my start and end dates...
-#    S2 = (ee.ImageCollection('COPERNICUS/S2_SR')
-#   .filterBounds(geom)
-#   .filterDate(start_date, end_date)
-#   .maskClouds()
-#   .scale()
-#   .index(['EVI','NDVI']))
-    
-    S2 = (ee.ImageCollection('COPERNICUS/S2_SR')
+    geom = geemap.gdf_to_ee(gdf)
+        
+    S2 = (ee.ImageCollection(col)
    .filterBounds(geom)
-   .filterDate('2016-01-01','2016-01-01')
+   .filterDate(start_date, end_date)
    .maskClouds()
-   .scale()
-   .index(['EVI','NDVI']))
-
-    # wow it works...(the first time but not since)
-    ts = S2.getTimeSeriesByRegions(reducer = [ee.Reducer.mean(),ee.Reducer.median()],
-                               collection = geom,
-                               bands = ['EVI','NDVI'],
-                               scale = 10,
-                               naValue = -99999999,
-                               dateColumn = 'my_date_colum',
-                               dateFormat = 'ms')
+   .scaleAndOffset()
+   .spectralIndices(bands))
     
-    # its very slow.......and very unreliable....
+    #wxee agg 
+    # tswx = wxee.TimeSeries(S2).select('NDVI')
+    # ts_filled = tswx.fill_gaps(3, "month", "center", reducer=ee.Reducer.median())
+    # monthly_ts_fl = ts_filled.aggregate_time(frequency="month", reducer=ee.Reducer.percentile([95]))
+    
+    # OK so with ISO date format it works, but NOT in 'ms' (miliseconds)
+    # if using the filled ts it just hangs - so something is not right....
+    # replace S2 to test!
+    ts = S2.getTimeSeriesByRegions(reducer=[ee.Reducer.mean()],
+                               collection=geom,
+                               bands=bands,
+                               scale=10,
+                               dateColumn ='date',
+                               dateFormat ='ISO')
+    
+    
+    
+    # ts = S2.getTimeSeriesByRegion(reducer=[ee.Reducer.mean()],
+    #                            geometry=geom,
+    #                            bands=bands,
+    #                            scale=10,
+    #                            dateColumn ='date',
+    #                            dateFormat ='ISO')
+
+    # the limit is 5000 for geemap...(or GEE??)
+    # think it is to do with printing to console...
     df = geemap.ee_to_pandas(ts)
     
-    # This maybe quicker not much in it. 
-    dfoot = eeconvert.fcToGdf(ts)
+    df[df==-9999]=np.nan
+    
+    df['date'] = pd.to_datetime(df['date'], infer_datetime_format=True)
+    
+    
+    
+    # works ok - lots of missing values of course could be filled/smoothed. 
+#    df = df.set_index('date')
+#    df.NDVI.plot.line()
+    
+    # Seems to work, but adding the corresponding dates is a pain...
+    yip = df.groupby(id_field)['NDVI'].apply(list).apply(pd.Series)
+    # likely a silly way to do this....
+    dates = df.groupby(id_field)['date'].apply(list).apply(pd.Series)
+    dtrow  = dates.iloc[0].tolist()
+    del dates
+    yip.columns = dtrow
 
-
+    # if a monthly agg
+    
+    df_ma = yip.rolling(20, center=True, closed='both').mean()
+    df_ma.plot.line()
+    
+    if agg == 'M':
+        yip.columns = yip.columns.strftime("%y-%m").to_list() 
+    else:
+        yip.columns = yip.columns.strftime("%y-%m-%d").to_list()
+        yip.columns = ["n-"+c for c in yip.columns]
+        
+    newdf = pd.merge(gdf, yip, on=gdf.index)
 
 def gdf2ee(gdf):
     

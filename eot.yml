@@ -2,10 +2,11 @@ name: eot
 
 channels:
   - conda-forge
-  - anaconda
+  - pyviz 
+
 
 dependencies:
-  - python=3
+  - python=3.9
   - pip
   - gdal
   - requests
@@ -19,15 +20,20 @@ dependencies:
   - shapely
   - joblib
   - tqdm
+  - statsmodels
   - earthengine-api
   - glob2
   - xarray
   - geemap
   - eemont
+  - wxee
+  - hvplot
+  - holoviews
+  - geoviews
 
   - pip:
     - ContrailOnlineCAClient
-    - reconvert
+#    - reconvert
     - geetools
-    - geedataset
+#    - geedataset
 
