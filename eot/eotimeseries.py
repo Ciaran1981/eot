@@ -69,7 +69,7 @@ def geos3(collection):
     return bs_collection
 
 
-def s2cloudless(start_date, end_date, geom, collection='COPERNICUS/S2_SR',
+def s2cloudless(collection, start_date, end_date, geom,
                 cloud_filter=60):
     
     """
@@ -79,7 +79,7 @@ def s2cloudless(start_date, end_date, geom, collection='COPERNICUS/S2_SR',
     ----------
     
     collection: 
-                either 'COPERNICUS/S2_SR' or 'COPERNICUS/S2'
+                a preconstructed S2 collection
               
     start_date: string
                     start date of time series
@@ -109,10 +109,12 @@ def s2cloudless(start_date, end_date, geom, collection='COPERNICUS/S2_SR',
     # mask_res = 60#; # resolution at which to generate and apply the cloud/shadow mask. 60m instead of 10m to speed up
     not_water = ee.Image("JRC/GSW1_2/GlobalSurfaceWater").select('max_extent').eq(0)
     
-    s2 = ee.ImageCollection(collection) \
-    .filterDate(start_date, end_date) \
-    .filterBounds(geom) \
-    .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_filter)
+    # s2 = ee.ImageCollection(collection) \
+    # .filterDate(start_date, end_date) \
+    # .filterBounds(geom) \
+    # .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_filter)
+    s2 = collection.filterMetadata('CLOUDY_PIXEL_PERCENTAGE',
+                                   'less_than', cloud_filter)
 
     # Import and filter s2cloudless.
     s2_cloudless_col = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY') \
@@ -581,7 +583,7 @@ def simplify(fc):
     return out
         
 def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
-               end_date='2016-12-31', dist=20, cloud_mask=True, 
+               end_date='2016-12-31', dist=20, cloud_mask=True, cloudless=True,
                stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False,
                agg='M'):
     
@@ -599,6 +601,7 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
     collection: string
                     the S2 collection either L1C (optional cld mask) 
                     or L2A (cld masked by default)
+                    or S2Cloudless
     
     start_date: string
                     start date of time series
@@ -611,6 +614,9 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
              
     cloud_mask: int
              whether to mask cloud
+
+    cloudless: bool
+             whether to use S2 cloudless to mask clouds
              
     cloud_perc: int
              the acceptable cloudiness per pixel in addition to prev arg
@@ -646,7 +652,12 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
         .filterDate(start_date, end_date)
         .maskClouds()
         #.scaleAndOffset()
-        .spectralIndices(['NDVI']))                                                
+        .spectralIndices(['NDVI']))
+        
+    if cloudless == True:
+        S2 = s2cloudless(S2, start_date, end_date, geometry,
+                        cloud_filter=60)
+                       
     
     if geometry['type'] == 'Polygon':
         
@@ -739,8 +750,9 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
 # A quick/dirty answer but not an efficient one - this took almost 2mins....
 
 def S2_ts(inshp, collection="L2A", reproj=False,
-          start_date='2016-01-01', end_date='2016-12-31', dist=20, cloud_mask=True, 
-               stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False, outfile=None, nt=-1,
+          start_date='2016-01-01', end_date='2016-12-31', dist=20, cloudless=True,
+          cloud_mask=True,   stat='max', cloud_perc=100, ndvi=True,#
+          bandlist=None, para=False, outfile=None, nt=-1,
                agg='M'):
     
     
@@ -820,6 +832,7 @@ def S2_ts(inshp, collection="L2A", reproj=False,
                     stat=stat,
                     cloud_perc=cloud_perc,
                     cloud_mask=cloud_mask,
+                    cloudless=cloudless,
                     ndvi=ndvi, 
                     bandlist=bandlist,
                     para=True,
