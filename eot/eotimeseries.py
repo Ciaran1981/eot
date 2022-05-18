@@ -6,7 +6,6 @@ view to comparing it with something else
 @author: Ciaran Robb
 
 """
-import ee
 import geemap
 import pandas as pd
 from datetime import datetime
@@ -21,13 +20,138 @@ import json
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from itertools import chain
-import ee, eemont, geemap
-import pandas as pd
-import numpy as np
+import ee, eemont
+from eot.s2_masks import addCloudShadowMask, applyCloudShadowMask, addGEOS3Mask
+from eot.s2_fcover import fcover
 ee.Initialize()
 
 ogr.UseExceptions()
 osr.UseExceptions()
+
+# TODO, this could just be added to s2cloudless
+def geos3(collection):
+
+    """
+    Add a geos3 bare soil band to a S2 collection
+    
+    Parameters
+    ----------
+    
+    collection: 
+                 a pre-constructed gee collection
+              
+    start_date: string
+                    start date of time series
+                    
+    end_date: string
+                    end date of time series
+    
+    geom: string
+          an ogr compatible file with an extent
+          
+          
+    Returns
+    -------
+    
+    S2 collection with s2 cloudless and fractional cover included
+    
+    """
+    
+    def _funcbs(img):
+        
+        geos3 = addGEOS3Mask(img)
+        return img.addBands(geos3)
+        # originally this updated the mask meaning only the bare pixels were returned for all bands
+        # return img.updateMask(geos3)
+        return img.addBands(geos3)
+
+    bs_collection = collection.map(_funcbs)
+    return bs_collection
+
+
+def s2cloudless(start_date, end_date, geom, collection='COPERNICUS/S2_SR',
+                cloud_filter=60):
+    
+    """
+    Make a S2 cloudless collection
+    
+    Parameters
+    ----------
+    
+    collection: 
+                either 'COPERNICUS/S2_SR' or 'COPERNICUS/S2'
+              
+    start_date: string
+                    start date of time series
+                    
+    end_date: string
+                    end date of time series
+    
+    geom: string
+          an ogr compatible file with an extent
+          
+    cloud_filter: int
+          cloud pixel percentage in image (default is 60 for s2 cloudless)
+          
+    Returns
+    -------
+    
+    S2 collection with s2 cloudless and fractional cover included
+    
+    """
+    # cheers google/soilwatch
+    # # Global Cloud Masking parameters
+    # cld_prb_thresh = 40#; # Cloud probability threshold to mask clouds. 40% is the default value of s2cloudless
+    # cloud_filter = 60#; # Threshold on sentinel-2 Metadata field determining whether cloud pixel percentage in image
+    # nir_drk_thresh = 0.15#; # A threshold that determines when to consider a dark area a cloud shadow or not
+    # cld_prj_dist = 10#; # The distance (in no of pixels) in which to search from detected cloud to find cloud shadows
+    # buffer = 50#; # The cloud buffer (in meters) to use around detected cloud pixels to mask additionally
+    # mask_res = 60#; # resolution at which to generate and apply the cloud/shadow mask. 60m instead of 10m to speed up
+    not_water = ee.Image("JRC/GSW1_2/GlobalSurfaceWater").select('max_extent').eq(0)
+    
+    s2 = ee.ImageCollection(collection) \
+    .filterDate(start_date, end_date) \
+    .filterBounds(geom) \
+    .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_filter)
+
+    # Import and filter s2cloudless.
+    s2_cloudless_col = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY') \
+      .filterBounds(geom) \
+      .filterDate(start_date, end_date)
+  
+    # To prevent bug the funcs must have the '**' for kwargs
+    s2_cl = ee.ImageCollection(ee.Join.saveFirst('s2cloudless').apply(**{
+      'primary': s2,
+      'secondary': s2_cloudless_col,
+      'condition': ee.Filter.equals(**{
+          'leftField': 'system:index',
+          'rightField': 'system:index'})})).sort('system:time_start')
+    
+    masked_collection = s2_cl.filter(ee.Filter.notNull(['MEAN_INCIDENCE_AZIMUTH_ANGLE_B3',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B4',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B5',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B6',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B7',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B8A',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B11',
+                                                            'MEAN_INCIDENCE_AZIMUTH_ANGLE_B12',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B3',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B4',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B5',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B6',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B7',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B8A',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B11',
+                                                            'MEAN_INCIDENCE_ZENITH_ANGLE_B12',
+                                                            'MEAN_SOLAR_AZIMUTH_ANGLE',
+                                                            'MEAN_SOLAR_ZENITH_ANGLE'])) \
+                            .map(addCloudShadowMask(not_water, 1e4)) \
+                            .map(applyCloudShadowMask) \
+                            .map(fcover(1e4)) \
+                            .select(['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12', 'fcover'])
+
+    return masked_collection
+
 
 def get_month_ndperc(start_date, end_date, geom, collection="COPERNICUS/S2"):
     
@@ -56,7 +180,7 @@ def get_month_ndperc(start_date, end_date, geom, collection="COPERNICUS/S2"):
     
     """
     
-
+    
     roi = extent2poly(geom, filetype='polygon')
     
     imcol = ee.ImageCollection(
