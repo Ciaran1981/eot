@@ -28,6 +28,46 @@ ee.Initialize()
 ogr.UseExceptions()
 osr.UseExceptions()
 
+def get_collection_dates(collection):
+    
+    """
+    Extract the dates from an image collection in a palatable format
+    
+    Parameters
+    ----------
+    
+    collection: 
+                 a pre-constructed gee 
+    
+    """
+    
+    def dfunc(image):
+        return ee.Feature(None, {'date': image.date().format('YYYY-MM-dd')})
+
+    dates = collection.map(dfunc).distinct('date').aggregate_array('date')
+    return dates
+
+
+def clip_collection(collection, geom):
+    
+    """
+    Clip a collection with a geometry
+    
+    Parameters
+    ----------
+    
+    collection: 
+                 a pre-constructed gee 
+    
+    geom:
+          an gee geometry
+    
+    """
+    
+    def _clip(image):
+        return image.clip(geom)
+    return collection.map(_clip)
+
 # TODO, this could just be added to s2cloudless
 def geos3(collection):
 
@@ -53,7 +93,7 @@ def geos3(collection):
     Returns
     -------
     
-    S2 collection with s2 cloudless and fractional cover included
+    S2 collection with geos3 mask band (binary) included
     
     """
     
