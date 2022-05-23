@@ -21,8 +21,10 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from itertools import chain
 import ee, eemont
-from eot.s2_masks import addCloudShadowMask, applyCloudShadowMask, addGEOS3Mask
+from eot.s2_masks import addCloudShadowMask, applyCloudShadowMask, addGEOS3Mask, loadImageCollection
 from eot.s2_fcover import fcover
+from eot.composites import*
+import math
 ee.Initialize()
 
 ogr.UseExceptions()
@@ -57,7 +59,7 @@ def clip_collection(collection, geom):
     ----------
     
     collection: 
-                 a pre-constructed gee 
+                 a pre-constructed gee collection
     
     geom:
           an gee geometry
@@ -107,6 +109,141 @@ def geos3(collection):
 
     bs_collection = collection.map(_funcbs)
     return bs_collection
+
+def _funcbsnotmask(img):
+    geos3 = addGEOS3Mask(img)
+    return img.updateMask(geos3)
+
+def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-01-01',
+                        band_list=['fcover']):
+    """
+    Generate bare soil(bs) layers using google earth engine
+    
+    Parameters
+    ----------
+    
+    inshp: string
+        Path to input vector file.
+        
+    start_date: string
+                    start date of time series
+                    
+    end_date: string
+                    end date of time series  
+                    
+    year: string
+        The year to return a collection from. The default is '2021'.
+
+    Returns
+    -------
+    A tuple containing bs_masked, bs_collection, bs_freq
+
+    """
+    
+    
+    # get the shp file ext to demarcate the collection
+    county = extent2poly(inshp, filetype='polygon', outfile=False, 
+                         polytype="ESRI Shapefile",  geecoord=True)
+    geom = county
+    
+    years = ee.Dictionary({'2016': 'COPERNICUS/S2',
+                               '2017': 'COPERNICUS/S2',
+                               '2018': 'COPERNICUS/S2',
+                               '2019': 'COPERNICUS/S2_SR',
+                               '2020': 'COPERNICUS/S2_SR',
+                               '2021': 'COPERNICUS/S2_SR'})
+
+    # date range dict
+    dts = {'start': start_date, 'end': end_date}
+    date_range_temp = ee.Dictionary(dts)
+    year = start_date[0:4]
+
+    # Load the Sentinel-2 collection for the time period and area requested
+    s2_cl = loadImageCollection(ee.String(years.get(year)).getInfo(), 
+                                date_range_temp, geom)
+ 
+    masked_collection = s2cloudless(s2_cl, dts['start'], dts['end'], geom,
+                    cloud_filter=60)
+    
+    # handy for now (cheers soilwatch - credit to them), but likely to be replaced
+    # by uk datasets
+    # Import external mask datasets
+    # JRC Global Surface Water mask
+    not_water = ee.Image("JRC/GSW1_2/GlobalSurfaceWater").select('max_extent').eq(0) 
+    # JRC global human settlement layer
+    jrc_builtup = ee.Image("JRC/GHSL/P2016/BUILT_LDSMT_GLOBE_V1")
+    # Facebook Population Layer under MIT License, courtesy of: Copyright (c) 2021 Samapriya Roy
+    facebook_builtup = ee.ImageCollection("projects/sat-io/open-datasets/hrsl/hrslpop")
+    # Combine JRC builtup and facebook population as builtup mask
+    not_builtup = jrc_builtup.select('built').gt(2) \
+                      .bitwiseOr(facebook_builtup.mosaic().unmask(0).gt(1)) \
+                      .Not()
+    
+    dem = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM")
+    dem_proj = dem.first().projection()
+    dem = dem.mosaic().setDefaultProjection(dem_proj)
+
+    slope_deg = ee.Terrain.slope(dem)
+    #slope_rad = slope_deg.multiply(ee.Image(math.pi).divide(180))
+    #slope_aspect = ee.Terrain.aspect(dem)
+    #LS = factorLS(slope_deg, slope_rad, slope_aspect)
+    
+    # TODO does this need to be 2 collections?
+    # for the freq calculation
+    bs_collection = masked_collection.map(_funcbsnotmask)
+    # ...and the one with a binary mask wherever there is bare soil.
+    bs_masked = geos3(masked_collection)
+    
+    # Set base date to generate a Day of Year layer
+    
+    #from_date = ee.Date.parse('YYYY-MM-dd', year + '-01-01')
+
+    # # Generate the series to be used as input for the drawing tool plot.
+    # plot_series = drawingTools.preparePlotSeries(masked_collection, bs_collection, geom,
+    #                                                  from_date, date_range_temp, band_list)
+
+    date_range = date_range_temp
+
+    # Apply the actual date range specified, as opposed to the full year (required for the drawing tools plotting)
+    masked_collection = masked_collection.filterDate(date_range.get('start'), date_range.get('end'))
+
+    bs_collection = bs_collection.filterDate(date_range.get('start'), date_range.get('end'))
+    #v_collection = v_collection.filterDate(date_range.get('start'), date_range.get('end'))
+
+    # Generate a list of time intervals for which to generate a harmonized time series
+    time_intervals = extractTimeRanges(date_range.get('start'), date_range.get('end'), 30)
+
+    #TODO - post translation the harmonic series is not working - 
+    # not critical but it'd be nice to ken 
+    # the naming problem occurs here!! All fine until this point
+    # Generate harmonized monthly time series of FCover as input to the vegetation factor V
+    #fcover_ts = harmonizedTS(masked_collection, band_list, time_intervals, band_name='fcover')#, {'agg_type': 'geomedian'})
+
+    # Run a harmonic regression on the time series to fill missing data gaps and smoothen the NDVI profile.
+    #fcover_ts_smooth = harmonicRegression(fcover_ts, 'fcover', 4)
+                                     # clamping to [0,10000] data range,
+                                     # as harmonic regression may shoot out of data range
+
+    # Calculate the bare soil frequency,
+    # i.e. the number of bare soil observations divided by the number of cloud-free observations
+    bs_freq = bs_collection.select('B2').count() \
+                  .divide(masked_collection.select('B2').count()) \
+                  .rename('bare_soil_frequency') \
+                  .clip(geom) \
+                  .updateMask(not_water.And(not_builtup).And(slope_deg.lte(26.6)))
+                  
+    # TODO Update! fine for now but perhaps improvable
+    # Define a mask that categorizes pixels > 95% frequency as permanently bare,
+    # i.e. rocky outcrops and other bare surfaces that have little to no restoration potential
+    bs_freq_mask = bs_freq.gt(0).And(bs_freq.lt(0.95))
+
+    #area_chart =  charts.areaChart(bs_freq, 'bare_soil_frequency', geom, pie_options)
+
+    bs_freq = bs_freq.updateMask(bs_freq_mask)
+    
+    return bs_masked, bs_collection, bs_freq
+  
+
 
 
 def s2cloudless(collection, start_date, end_date, geom,
@@ -621,7 +758,178 @@ def simplify(fc):
             return out
     out = [feature2dict(x) for x in fc['features']]
     return out
+
+def _bs_tseries(geometry,  collection="L2A", start_date='2016-01-01',
+               end_date='2016-12-31', dist=20, cloud_mask=True, cloudless=True,
+               stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False,
+               agg='W'):
+    
+    """
+    Bare soil Time series from a single coordinate/polygon using gee
+    
+    Parameters
+    ----------
+    
+    geometry: list
+                either [lon,lat] fot a point, or a set of coordinates for a 
+                polygon
+
+
+    collection: string
+                    the S2 collection either L1C (optional cld mask) 
+                    or L2A (cld masked by default)
+                    or S2Cloudless
+    
+    start_date: string
+                    start date of time series
+    
+    end_date: string
+                    end date of time series
+                    
+    dist: int
+             the distance around point e.g. 20m
+             
+    cloud_mask: int
+             whether to mask cloud
+
+    cloudless: bool
+             whether to use S2 cloudless to mask clouds
+             
+    cloud_perc: int
+             the acceptable cloudiness per pixel in addition to prev arg
+
+    agg: string
+            aggregate to a pandas time signature
+            eg M or W etc
+            see https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliase
+              
+    """
+    # joblib hack - this is goona need to run in gee directly i think
+    if para == True:
+        ee.Initialize()
+    
+    # has to reside in here in order for para execution
+    # TODO scale needs to be made and explcit param above 
+    def _reduce_region(image):
+        # cheers geeextract!   
+        """Spatial aggregation function for a single image and a polygon feature"""
+        stat_dict = image.reduceRegion(fun, geometry, 20);
+        # FEature needs to be rebuilt because the backend doesn't accept to map
+        # functions that return dictionaries
+        return ee.Feature(None, stat_dict)
+    
+    if collection == 'L1C':
+        col ="COPERNICUS/S2" 
+        S2 = ee.ImageCollection(col).filterDate(start_date,
+                           end_date).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',
+                           cloud_perc))
+    elif collection == 'L2A':
+        col ="COPERNICUS/S2_SR"                                                     
+        S2 = (ee.ImageCollection(col)
+        .filterBounds(geometry)
+        .filterDate(start_date, end_date)
+        .maskClouds()
+        #.scaleAndOffset()
+        .spectralIndices(['NDVI']))
         
+    if cloudless == True:
+        S2 = s2cloudless(S2, start_date, end_date, geometry,
+                        cloud_filter=60)
+                       
+    
+    if geometry['type'] == 'Polygon':
+        
+        # cheers geeextract folks 
+        if stat == 'mean':
+            fun = ee.Reducer.mean()
+        elif stat == 'median':
+            fun = ee.Reducer.median()
+        elif stat == 'max':
+            fun = ee.Reducer.max()
+        elif stat == 'min':
+            fun = ee.Reducer.min()
+        elif stat == 'perc':
+            # for now as don't think there is equiv
+            fun = ee.Reducer.mean()
+        else:
+            raise ValueError('Must be one of mean, median, max, or min')
+        geomee = ee.Geometry.Polygon(geometry['coordinates'])
+        
+        s2List = S2.filterBounds(geomee).map(_reduce_region).getInfo()
+        s2List = simplify(s2List)
+        
+        df = pd.DataFrame(s2List)
+        
+    elif geometry['type'] == 'Point':
+    
+        # a point
+        geomee = ee.Geometry.Point(geometry['coordinates'])
+        # give the point a distance to ensure we are on a pixel
+        s2list = S2.filterBounds(geomee).getRegion(geomee, dist).getInfo()
+    
+        # the headings of the data
+        cols = s2list[0]
+        
+        # the rest
+        rem=s2list[1:len(s2list)]
+        
+        # now a big df to reduce somewhat
+        df = pd.DataFrame(data=rem, columns=cols)
+    else:
+        raise ValueError('geom must be either Polygon or Point')
+
+    # get a proper date
+    df['Date'] = df['id'].apply(_conv_date)
+    
+    if cloud_mask == True and collection == 'L1C':
+        
+        # Have kept the bitwise references here
+        cloudBitMask = 1024 #1 << 10 
+        cirrusBitMask = 2048 # 1 << 11 
+        
+        df = df.drop(df[df.QA60 == cloudBitMask].index)
+        df = df.drop(df[df.QA60 == cirrusBitMask].index)
+        # could be done on server....
+        df['NDVI'] = (df['B8'] - df['B4']) / (df['B8'] + df['B4'])
+    
+    # May change to this for merging below
+    df = df.set_index(df['Date'])
+    # due to the occasional bug being an object
+    #if ndvi == True and bandlist == None:
+    #nd = pd.to_numeric(pd.Series(df['NDVI']))
+    bs = pd.Series(df['GEOS3'])
+    #elif ndvi == True and bandlist != None:
+        #TODO why have done the above when it is simpler to do the below
+    #    bandlist.append('NDVI')
+    #    nd = df[bandlist]#.to_numpy()
+    #elif ndvi == False and bandlist != None:
+    #    nd = df[bandlist]
+    # return nd
+    # may be an idea to label the 'id' as a contant val or something
+    # dump the redundant  columns
+    
+    # A monthly dataframe 
+    # Should be max or upper 95th looking at NDVI
+    
+    # so here we want to resample the soil
+    if stat == 'max':
+        bs = bs.resample(rule=agg).max()
+    if stat == 'mean':
+        nd = bs.resample(rule=agg).mean()
+    if stat == 'median':
+        nd = bs.resample(rule=agg).max()
+    elif stat == 'perc':
+        # avoid potential outliers
+        nd = nd.resample(rule=agg).quantile(.95)
+    
+    # For entry to a shapefile must be this way up
+    return nd.transpose()
+
+
+
+
+
+
 def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
                end_date='2016-12-31', dist=20, cloud_mask=True, cloudless=True,
                stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False,
@@ -1610,8 +1918,8 @@ def S2ts_eemont(inshp, start_date='2020-01-01', end_date='2021-01-01',
     
     newdf = pd.merge(gdf, yip, on=gdf.index)
     
-    if outfile != None:
-        newdf.to_file(outfile)
+    # if outfile != None:
+    #     newdf.to_file(outfile)
     
     return newdf
     
