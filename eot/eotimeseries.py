@@ -20,13 +20,18 @@ import json
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from itertools import chain
-import ee, eemont
+import ee, eemont, wxee
 from eot.s2_masks import addCloudShadowMask, applyCloudShadowMask, addGEOS3Mask, loadImageCollection
 from eot.s2_fcover import fcover
 from eot.composites import*
 import math
 ee.Initialize()
 
+# stop this warning - concerns bs_ funcs at present
+# A value is trying to be set on a copy of a slice from a DataFrame
+# See the caveats in the documentation:
+# https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+pd.options.mode.chained_assignment = None
 ogr.UseExceptions()
 osr.UseExceptions()
 
@@ -117,13 +122,14 @@ def _funcbsnotmask(img):
 def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-01-01',
                         band_list=['fcover']):
     """
-    Generate bare soil(bs) layers using google earth engine
+    Generate bare soil(bs) layers using google earth engine with the GEOS3
+    method
     
     Parameters
     ----------
     
-    inshp: string
-        Path to input vector file.
+    inshp: string or json type dict
+        Path to input vector file or geojson/dict geometry
         
     start_date: string
                     start date of time series
@@ -141,10 +147,16 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-01-01',
     """
     
     
-    # get the shp file ext to demarcate the collection
-    county = extent2poly(inshp, filetype='polygon', outfile=False, 
+    
+    if isinstance(inshp, dict):
+        # if it is just a geojson geom carry on
+        geom = inshp 
+    else:
+        # we assume (probably shouldn't) it is a string
+        # get the shp file ext to demarcate the collection
+        county = extent2poly(inshp, filetype='polygon', outfile=False, 
                          polytype="ESRI Shapefile",  geecoord=True)
-    geom = county
+        geom = county
     
     years = ee.Dictionary({'2016': 'COPERNICUS/S2',
                                '2017': 'COPERNICUS/S2',
@@ -682,7 +694,10 @@ def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
     print('converting to pandas df')
     df = geemap.ee_to_pandas(table)
     # bin the const GEE index
-    df = df.drop(columns=['system:index'])
+    # df = df.drop(columns=['system:index'])
+    
+    # problem here is the geometry has been retained in a column which we don't want
+    
     #Nope.....
     #geemap.ee_export_vector(table, outfile)
     
@@ -759,10 +774,75 @@ def simplify(fc):
     out = [feature2dict(x) for x in fc['features']]
     return out
 
-def _bs_tseries(geometry,  collection="L2A", start_date='2016-01-01',
-               end_date='2016-12-31', dist=20, cloud_mask=True, cloudless=True,
-               stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False,
-               agg='W'):
+def harmonic_regress(collection, dependent='NDVI', harmonics=3):
+    
+    """
+    Fit a harmonic regression to a gappy time series using GEE
+    
+    Parameters
+    ----------
+    
+    collection: gee image collection
+                e.g. S2 with NDVI/fcover calculated
+    
+    dependent: string
+               the dependent variable usually a veg index 
+                
+    harmonics: int
+               
+    """
+    
+    # Credit to Joao Otavio Nascimento Firigato for this implementation
+    # I merely made it a function for any collection
+    
+    
+    harmonicFrequencies = list(range(1, harmonics+1))
+    
+    def getNames(base, lst_freq):
+        name_lst = []
+        for i in lst_freq:
+            name_lst.append(ee.String(base + str(i)))
+        return name_lst
+    
+    cosNames = getNames('cos_', harmonicFrequencies)
+    sinNames = getNames('sin_', harmonicFrequencies)
+    independents = ee.List(['constant','t']).cat(cosNames).cat(sinNames)
+    
+    def addConstant(image):
+        return image.addBands(ee.Image(1))
+    
+    def addTime(image):
+        date = ee.Date(image.get('system:time_start'))
+        # may need to alter this...
+        years = date.difference(ee.Date('1970-01-01'), 'year')
+        timeRadians = ee.Image(years.multiply(2 * math.pi))
+        return image.addBands(timeRadians.rename('t').float())
+    
+    def addHarmonics(image):
+        frequencies = ee.Image.constant(harmonicFrequencies)
+        time = ee.Image(image).select('t')
+        cosines = time.multiply(frequencies).cos().rename(cosNames)
+        sines = time.multiply(frequencies).sin().rename(sinNames)
+        return image.addBands(cosines).addBands(sines)
+    
+    # used modis but now any given collection
+    harmonicC = collection.map(addConstant).map(addTime).map(addHarmonics)
+    
+    harmonicTrend = harmonicC.select(independents.add(dependent)).reduce(ee.Reducer.linearRegression(independents.length(), 1))
+    
+    harmonicTrendCoefficients = harmonicTrend.select('coefficients').arrayProject([0]).arrayFlatten([independents])
+    
+    fittedHarmonic = harmonicC.map(
+        lambda image : image.addBands(image.select(
+            independents).multiply(harmonicTrendCoefficients).reduce('sum').rename('fitted')))
+    
+    return fittedHarmonic
+    
+
+
+def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=20, 
+               stat='mean', para=False, bandList=['GEOS3'],
+               agg='week'):
     
     """
     Bare soil Time series from a single coordinate/polygon using gee
@@ -774,12 +854,6 @@ def _bs_tseries(geometry,  collection="L2A", start_date='2016-01-01',
                 either [lon,lat] fot a point, or a set of coordinates for a 
                 polygon
 
-
-    collection: string
-                    the S2 collection either L1C (optional cld mask) 
-                    or L2A (cld masked by default)
-                    or S2Cloudless
-    
     start_date: string
                     start date of time series
     
@@ -788,20 +862,9 @@ def _bs_tseries(geometry,  collection="L2A", start_date='2016-01-01',
                     
     dist: int
              the distance around point e.g. 20m
-             
-    cloud_mask: int
-             whether to mask cloud
-
-    cloudless: bool
-             whether to use S2 cloudless to mask clouds
-             
-    cloud_perc: int
-             the acceptable cloudiness per pixel in addition to prev arg
 
     agg: string
-            aggregate to a pandas time signature
-            eg M or W etc
-            see https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliase
+            aggregate to... 'week', 'month'
               
     """
     # joblib hack - this is goona need to run in gee directly i think
@@ -817,61 +880,51 @@ def _bs_tseries(geometry,  collection="L2A", start_date='2016-01-01',
         # FEature needs to be rebuilt because the backend doesn't accept to map
         # functions that return dictionaries
         return ee.Feature(None, stat_dict)
+    # we only need the collection with the masks as a layer
+    bs_masked, _, _ = baresoil_collection(geometry, start_date=start_date, 
+                                          end_date=end_date, 
+                                          band_list=['fcover'])
     
-    if collection == 'L1C':
-        col ="COPERNICUS/S2" 
-        S2 = ee.ImageCollection(col).filterDate(start_date,
-                           end_date).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',
-                           cloud_perc))
-    elif collection == 'L2A':
-        col ="COPERNICUS/S2_SR"                                                     
-        S2 = (ee.ImageCollection(col)
-        .filterBounds(geometry)
-        .filterDate(start_date, end_date)
-        .maskClouds()
-        #.scaleAndOffset()
-        .spectralIndices(['NDVI']))
-        
-    if cloudless == True:
-        S2 = s2cloudless(S2, start_date, end_date, geometry,
-                        cloud_filter=60)
-                       
-    
+    # This produces beautiful smooth curves are they too similar or not from
+    # one yr to the next?
+    # worth remembering it is cover rather than ndvi....
+    dep = 'fcover'
+    bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
+    #No longer using pandas as no need
+    ts = wxee.TimeSeries(bsfinal).select('fitted')
+    ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
+                          
     if geometry['type'] == 'Polygon':
         
-        # cheers geeextract folks 
-        if stat == 'mean':
-            fun = ee.Reducer.mean()
-        elif stat == 'median':
-            fun = ee.Reducer.median()
-        elif stat == 'max':
-            fun = ee.Reducer.max()
-        elif stat == 'min':
-            fun = ee.Reducer.min()
-        elif stat == 'perc':
-            # for now as don't think there is equiv
-            fun = ee.Reducer.mean()
-        else:
-            raise ValueError('Must be one of mean, median, max, or min')
+        # have to choose median to get both the mask and the fcover
+        fun = ee.Reducer.median()
+        # ideal would be mode but this is not ideal for fcover
+        # we don't want to calculate this twice after all as it will slow things
+
         geomee = ee.Geometry.Polygon(geometry['coordinates'])
         
-        s2List = S2.filterBounds(geomee).map(_reduce_region).getInfo()
-        s2List = simplify(s2List)
+        # the problem we have here is the binary values  become decimal
+        # as I assume the are a fraction of the area that is bare
+        # this is in fact probably not a bad thing
         
-        df = pd.DataFrame(s2List)
+        bsList = ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
+        bsList = simplify(bsList)
+        
+        df = pd.DataFrame(bsList)
+        
         
     elif geometry['type'] == 'Point':
     
         # a point
         geomee = ee.Geometry.Point(geometry['coordinates'])
         # give the point a distance to ensure we are on a pixel
-        s2list = S2.filterBounds(geomee).getRegion(geomee, dist).getInfo()
+        bsList = ts_fl.filterBounds(geomee).getRegion(geomee, dist).getInfo()
     
         # the headings of the data
-        cols = s2list[0]
+        cols = bsList[0]
         
         # the rest
-        rem=s2list[1:len(s2list)]
+        rem=bsList[1:len(bsList)]
         
         # now a big df to reduce somewhat
         df = pd.DataFrame(data=rem, columns=cols)
@@ -881,59 +934,133 @@ def _bs_tseries(geometry,  collection="L2A", start_date='2016-01-01',
     # get a proper date
     df['Date'] = df['id'].apply(_conv_date)
     
-    if cloud_mask == True and collection == 'L1C':
-        
-        # Have kept the bitwise references here
-        cloudBitMask = 1024 #1 << 10 
-        cirrusBitMask = 2048 # 1 << 11 
-        
-        df = df.drop(df[df.QA60 == cloudBitMask].index)
-        df = df.drop(df[df.QA60 == cirrusBitMask].index)
-        # could be done on server....
-        df['NDVI'] = (df['B8'] - df['B4']) / (df['B8'] + df['B4'])
-    
     # May change to this for merging below
     df = df.set_index(df['Date'])
-    # due to the occasional bug being an object
-    #if ndvi == True and bandlist == None:
-    #nd = pd.to_numeric(pd.Series(df['NDVI']))
+
+    # should be this but....
+    #bs = df[bandList]    
+    #TODO fix issue in merge in main func to do with shape
+    # finaldf = pd.DataFrame(datalist)
+    # when creating the final df it complains about the shape being (n,n,n)
+    # so having to export a series - have tried list of series and didn't work
     bs = pd.Series(df['GEOS3'])
-    #elif ndvi == True and bandlist != None:
-        #TODO why have done the above when it is simpler to do the below
-    #    bandlist.append('NDVI')
-    #    nd = df[bandlist]#.to_numpy()
-    #elif ndvi == False and bandlist != None:
-    #    nd = df[bandlist]
-    # return nd
-    # may be an idea to label the 'id' as a contant val or something
-    # dump the redundant  columns
+    fcover = pd.Series(df['fitted'])
     
-    # A monthly dataframe 
-    # Should be max or upper 95th looking at NDVI
-    
-    # so here we want to resample the soil
-    if stat == 'max':
-        bs = bs.resample(rule=agg).max()
-    if stat == 'mean':
-        nd = bs.resample(rule=agg).mean()
-    if stat == 'median':
-        nd = bs.resample(rule=agg).max()
-    elif stat == 'perc':
-        # avoid potential outliers
-        nd = nd.resample(rule=agg).quantile(.95)
+    # As we used the spatial mean earlier the bare soil needs rounded up 
+    # to be binary again
+    # stop the stupid warning
+      # default='warn'
+    # this seems to be
+    #bs['GEOS3'] = bs.fillna(0)
+    #bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
     # For entry to a shapefile must be this way up
-    return nd.transpose()
+    # this not working
+    # [bs.transpose(), fcover.transpose()]
+    return bs.transpose()
+
+def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31', 
+          dist=20, stat='mean', cloud_perc=100, para=False, 
+          bandList=['fcover', 'GEOS3'],
+          agg='W', outfile=None, nt=-1):
+    
+    
+    """
+    Bare soil Time series from polygons/points using gee
+    
+    Parameters
+    ----------
+    
+    geometry: list
+                either [lon,lat] for a point, or a set of coordinates for a 
+                polygon
+
+    start_date: string
+                    start date of time series
+    
+    end_date: string
+                    end date of time series
+                    
+    dist: int
+             the distance around point e.g. 20m
+    
+    outfile: string
+           the output shapefile if required
+
+    agg: string
+            aggregate to... 'week', 'month'
+              
+    """
+    # possible to access via gpd & the usual shapely fare....
+    # geom = gdf['geometry'][0]
+    # geom.exterior.coords.xy
+    # but will lead to issues....
+    
+    geom = poly2dictlist(inshp, wgs84=reproj)
+    
+    idx = np.arange(0, len(geom))
+    
+    gdf = gpd.read_file(inshp)
+    
+    # silly gpd issue
+    if 'key_0' in gdf.columns:
+        gdf = gdf.drop(columns=['key_0'])
+    
+    datalist = Parallel(n_jobs=nt, verbose=2)(delayed(_bs_tseries)(
+                    geom[p],
+                    start_date=start_date,
+                    end_date=end_date,
+                    stat=stat,
+                    para=True,
+                    agg=agg) for p in idx)
+    
+
+    
+    finaldf = pd.DataFrame(datalist)
+    
+    if agg == 'M':
+        finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
+    else:
+        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+        
+    #TODO There must be a more elegant/efficient way
+    # listarrs = [d.to_numpy().flatten() for d in datalist]
+    # finaldf = pd.DataFrame(np.vstack(listarrs))
+    # del listarrs
+    
+    # colstmp = []
+    # # this seems inefficient
+    # times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+    # for b in bandList:
+    #     tmp = [b+"-"+ t for t in times]
+    #     colstmp.append(tmp)
+    # # apperently quickest
+    # colsfin = list(chain.from_iterable(colstmp))
+     
+    # finaldf.columns = colsfin
 
 
+    finaldf.columns = ["b-"+c for c in finaldf.columns]
+
+    # for some reason merge no longer working due to na error when there is none
+    # hence concat. If they are in correct order no reason to worry as
+    # no index is present in the ndvi df anyway. 
+    #newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    
+    # idx must be unique so make it the gdf one
+    finaldf.index = gdf.index 
+    newdf = pd.concat([gdf, finaldf], axis=1)
+    
+    if outfile != None:
+        newdf.to_file(outfile) # todo? driver='GPKG', layer='name')
+    
+    return newdf
 
 
-
-
-def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
-               end_date='2016-12-31', dist=20, cloud_mask=True, cloudless=True,
-               stat='max', cloud_perc=100, ndvi=True, bandlist=None, para=False,
-               agg='M'):
+def _s2_tseries(geometry, start_date='2016-01-01',
+               end_date='2016-12-31', dist=20, 
+               stat='median', cloud_filter=60, bandlist='NDVI', para=False,
+               agg='month'):
     
     """
     S2 Time series from a single coordinate using gee
@@ -944,12 +1071,6 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
     geometry: list
                 either [lon,lat] fot a point, or a set of coordinates for a 
                 polygon
-
-
-    collection: string
-                    the S2 collection either L1C (optional cld mask) 
-                    or L2A (cld masked by default)
-                    or S2Cloudless
     
     start_date: string
                     start date of time series
@@ -960,22 +1081,17 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
     dist: int
              the distance around point e.g. 20m
              
-    cloud_mask: int
+    cloud_filter: int
              whether to mask cloud
-
-    cloudless: bool
-             whether to use S2 cloudless to mask clouds
-             
-    cloud_perc: int
-             the acceptable cloudiness per pixel in addition to prev arg
+    
+    bandlist: str or List
+             the bands to use as time series (only one for now!) Lists to come
 
     agg: string
-            aggregate to a pandas time signature
-            eg M or W etc
-            see https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliase
+            aggregate to... 'week', 'month'
               
     """
-    # joblib hack - this is goona need to run in gee directly i think
+    # joblib hack - this is gonna need to run in gee directly i think
     if para == True:
         ee.Initialize()
     
@@ -988,24 +1104,42 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
         # functions that return dictionaries
         return ee.Feature(None, stat_dict)
     
-    if collection == 'L1C':
-        col ="COPERNICUS/S2" 
-        S2 = ee.ImageCollection(col).filterDate(start_date,
-                           end_date).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',
-                           cloud_perc))
-    elif collection == 'L2A':
-        col ="COPERNICUS/S2_SR"                                                     
-        S2 = (ee.ImageCollection(col)
-        .filterBounds(geometry)
-        .filterDate(start_date, end_date)
-        .maskClouds()
-        #.scaleAndOffset()
+    #TODO this results in the loss of NDVI.....
+    #eemont may juts slow things down - may just add NDVI in masks module
+    
+    years = ee.Dictionary({'2016': 'COPERNICUS/S2',
+                               '2017': 'COPERNICUS/S2',
+                               '2018': 'COPERNICUS/S2',
+                               '2019': 'COPERNICUS/S2_SR',
+                               '2020': 'COPERNICUS/S2_SR',
+                               '2021': 'COPERNICUS/S2_SR'})
+
+    # date range dict
+    dts = {'start': start_date, 'end': end_date}
+    date_range_temp = ee.Dictionary(dts)
+    year = start_date[0:4]
+
+    # Load the Sentinel-2 collection for the time period and area requested
+    s2_cl = loadImageCollection(ee.String(years.get(year)).getInfo(), 
+                                date_range_temp, geometry)
+    
+    S2cld = s2cloudless(s2_cl, start_date, end_date, geometry,
+                    cloud_filter=cloud_filter)
+    # pointless repetition (should likely go in s2cloudless)
+    S2 = (ee.ImageCollection(S2cld)
         .spectralIndices(['NDVI']))
-        
-    if cloudless == True:
-        S2 = s2cloudless(S2, start_date, end_date, geometry,
-                        cloud_filter=60)
-                       
+    
+    # how does one map over a list in GEE
+    # def hrfunc(collection, band):
+    #     harmonic_regress(S2, dependent=band, harmonics=3)
+    
+    
+    S2final = harmonic_regress(S2, dependent=bandlist, harmonics=3) 
+    
+    #No longer using pandas as no need
+    ts = wxee.TimeSeries(S2final).select('fitted')
+    ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
+                     
     
     if geometry['type'] == 'Polygon':
         
@@ -1025,17 +1159,18 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
             raise ValueError('Must be one of mean, median, max, or min')
         geomee = ee.Geometry.Polygon(geometry['coordinates'])
         
-        s2List = S2.filterBounds(geomee).map(_reduce_region).getInfo()
-        s2List = simplify(s2List)
+        S2List = ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
+        S2List = simplify(S2List)
         
-        df = pd.DataFrame(s2List)
+        df = pd.DataFrame(S2List)
+        
         
     elif geometry['type'] == 'Point':
     
         # a point
         geomee = ee.Geometry.Point(geometry['coordinates'])
         # give the point a distance to ensure we are on a pixel
-        s2list = S2.filterBounds(geomee).getRegion(geomee, dist).getInfo()
+        s2list = ts_fl.filterBounds(geomee).getRegion(geomee, dist).getInfo()
     
         # the headings of the data
         cols = s2list[0]
@@ -1051,71 +1186,38 @@ def _s2_tseries(geometry,  collection="L2A", start_date='2016-01-01',
     # get a proper date
     df['Date'] = df['id'].apply(_conv_date)
     
-    if cloud_mask == True and collection == 'L1C':
-        
-        # Have kept the bitwise references here
-        cloudBitMask = 1024 #1 << 10 
-        cirrusBitMask = 2048 # 1 << 11 
-        
-        df = df.drop(df[df.QA60 == cloudBitMask].index)
-        df = df.drop(df[df.QA60 == cirrusBitMask].index)
-        # could be done on server....
-        df['NDVI'] = (df['B8'] - df['B4']) / (df['B8'] + df['B4'])
-    
     # May change to this for merging below
     df = df.set_index(df['Date'])
+
     # due to the occasional bug being an object
-    if ndvi == True and bandlist == None:
-        nd = pd.to_numeric(pd.Series(df['NDVI']))
-    elif ndvi == True and bandlist != None:
-        #TODO why have done the above when it is simpler to do the below
-        bandlist.append('NDVI')
-        nd = df[bandlist]#.to_numpy()
-    elif ndvi == False and bandlist != None:
-        nd = df[bandlist]
-    # return nd
-    # may be an idea to label the 'id' as a contant val or something
-    # dump the redundant  columns
-    
-    # A monthly dataframe 
-    # Should be max or upper 95th looking at NDVI
-    
-    
-    if stat == 'max':
-        nd = nd.resample(rule=agg).max()
-    if stat == 'mean':
-        nd = nd.resample(rule=agg).mean()
-    if stat == 'median':
-        nd = nd.resample(rule=agg).max()
-    elif stat == 'perc':
-        # avoid potential outliers
-        nd = nd.resample(rule=agg).quantile(.95)
-    
-    # For entry to a shapefile must be this way up
+    # if bandlist == None:
+    nd = pd.to_numeric(pd.Series(df['fitted']))
+    # elif bandlist != None:
+    #     #TODO why have done the above when it is simpler to do the below
+    #     bandlist.append('NDVI')
+    #     nd = df[bandlist]#.to_numpy()
+
     return nd.transpose()
     
 
 # A quick/dirty answer but not an efficient one - this took almost 2mins....
 
-def S2_ts(inshp, collection="L2A", reproj=False,
-          start_date='2016-01-01', end_date='2016-12-31', dist=20, cloudless=True,
-          cloud_mask=True,   stat='max', cloud_perc=100, ndvi=True,#
-          bandlist=None, para=False, outfile=None, nt=-1,
-               agg='M'):
+def S2_ts(inshp, reproj=False,
+          start_date='2016-01-01', end_date='2016-12-31', dist=20, 
+          stat='max', cloud_filter=60, 
+          bandlist='NDVI', para=False, outfile=None, nt=-1,
+               agg='month'):
     
     
     """
-    Monthly time series from a point shapefile 
+    Monthly time series from a point shapefile - cloud is masked 
+    with S2 cloudless and collection is derived by year
     
     Parameters
     ----------
              
     inshp: string
                 a shapefile to join the results to 
-              
-    collection: string
-                    the S2 collection either L1C (optional cld mask) 
-                    or L2A (cld masked by default)
     
     reproj: bool
                 whether to reproject to wgs84, lat/lon
@@ -1128,20 +1230,18 @@ def S2_ts(inshp, collection="L2A", reproj=False,
                     
     dist: int
              the distance around point e.g. 20m
+    
+    bandList: str or List
+             the bands to use as time series (only one for now!) Lists to come
              
-    cloud_mask: int
-             whether to mask cloud
-             
-    cloud_perc: int
+    cloud_filter: int
              the acceptable cloudiness per pixel in addition to prev arg
     
     outfile: string
            the output shapefile if required
 
     agg: string
-            aggregate to a pandas time signature
-            eg M or W etc
-            see https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliase
+            aggregate to... 'week', 'month'
              
              
     Returns
@@ -1174,45 +1274,41 @@ def S2_ts(inshp, collection="L2A", reproj=False,
     
     datalist = Parallel(n_jobs=nt, verbose=2)(delayed(_s2_tseries)(
                     geom[p],
-                    collection=collection,
                     start_date=start_date,
                     end_date=end_date,
                     stat=stat,
-                    cloud_perc=cloud_perc,
-                    cloud_mask=cloud_mask,
-                    cloudless=cloudless,
-                    ndvi=ndvi, 
+                    cloud_filter=cloud_filter,
                     bandlist=bandlist,
                     para=True,
                     agg=agg) for p in idx) 
     
-    if bandlist != None:
+    # if bandlist != None:
         
-        #TODO There must be a more elegant/efficient way
-        listarrs = [d.to_numpy().flatten() for d in datalist]
-        finaldf = pd.DataFrame(np.vstack(listarrs))
-        del listarrs
+    #     #TODO There must be a more elegant/efficient way
+    #     listarrs = [d.to_numpy().flatten() for d in datalist]
+    #     finaldf = pd.DataFrame(np.vstack(listarrs))
+    #     del listarrs
         
-        colstmp = []
-        # this seems inefficient
-        times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-        for b in bandlist:
-            tmp = [b+"-"+ t for t in times]
-            colstmp.append(tmp)
-        # apperently quickest
-        colsfin = list(chain.from_iterable(colstmp))
+    #     colstmp = []
+    #     # this seems inefficient
+    #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+    #     for b in bandlist:
+    #         tmp = [b+"-"+ t for t in times]
+    #         colstmp.append(tmp)
+    #     # apperently quickest
+    #     colsfin = list(chain.from_iterable(colstmp))
         
-        finaldf.columns = colsfin
+    #     finaldf.columns = colsfin
 
         
-    else:
+    # else:
     
-        finaldf = pd.DataFrame(datalist)
+    finaldf = pd.DataFrame(datalist)
         
-        if agg == 'M':
-            finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-        else:
-            finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+    if agg == 'M':
+        finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
+    else:
+        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
     
 
         finaldf.columns = ["n-"+c for c in finaldf.columns]
