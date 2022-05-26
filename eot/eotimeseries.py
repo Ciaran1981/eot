@@ -119,7 +119,7 @@ def _funcbsnotmask(img):
     geos3 = addGEOS3Mask(img)
     return img.updateMask(geos3)
 
-def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-01-01',
+def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
                         band_list=['fcover']):
     """
     Generate bare soil(bs) layers using google earth engine with the GEOS3
@@ -841,7 +841,7 @@ def harmonic_regress(collection, dependent='NDVI', harmonics=3):
 
 
 def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=20, 
-               stat='mean', para=False, bandList=['GEOS3'],
+               stat='median', para=False, bandList=['GEOS3', 'fitted'],
                agg='week'):
     
     """
@@ -885,27 +885,25 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
                                           end_date=end_date, 
                                           band_list=['fcover'])
     
-    # This produces beautiful smooth curves are they too similar or not from
-    # one yr to the next?
+    # This produces smooth curves are they too similar or not from
+    # one yr to the next
     # worth remembering it is cover rather than ndvi....
     dep = 'fcover'
     bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
     #No longer using pandas as no need
-    ts = wxee.TimeSeries(bsfinal).select('fitted')
+    ts = wxee.TimeSeries(bsfinal).select(['fitted', 'GEOS3'])
     ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
                           
     if geometry['type'] == 'Polygon':
         
-        # have to choose median to get both the mask and the fcover
+        # have to choose median to get both the mask(the mask si binary of course)
+        # and the fcover
         fun = ee.Reducer.median()
-        # ideal would be mode but this is not ideal for fcover
-        # we don't want to calculate this twice after all as it will slow things
+        # ideal would be mode but this is not suitable for fcover
+        # don't want to calculate this twice after all as it will slow things
 
         geomee = ee.Geometry.Polygon(geometry['coordinates'])
         
-        # the problem we have here is the binary values  become decimal
-        # as I assume the are a fraction of the area that is bare
-        # this is in fact probably not a bad thing
         
         bsList = ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
         bsList = simplify(bsList)
@@ -938,13 +936,13 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     df = df.set_index(df['Date'])
 
     # should be this but....
-    #bs = df[bandList]    
+    bs = df[bandList]    
     #TODO fix issue in merge in main func to do with shape
     # finaldf = pd.DataFrame(datalist)
     # when creating the final df it complains about the shape being (n,n,n)
     # so having to export a series - have tried list of series and didn't work
-    bs = pd.Series(df['GEOS3'])
-    fcover = pd.Series(df['fitted'])
+    #bs = pd.Series(df['GEOS3'])
+    #fcover = pd.Series(df['fitted'])
     
     # As we used the spatial mean earlier the bare soil needs rounded up 
     # to be binary again
@@ -955,14 +953,14 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     #bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
     # For entry to a shapefile must be this way up
-    # this not working
-    # [bs.transpose(), fcover.transpose()]
-    return bs.transpose()
+    # this not working when in main func below
+    # AttributeError: 'RangeIndex' object has no attribute 'strftime'
+    # return (pd.to_numeric(bs.transpose()), pd.to_numeric(fcover.transpose()))
+    return bs.transpose()#, fcover.transpose()
 
 def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31', 
-          dist=20, stat='mean', cloud_perc=100, para=False, 
-          bandList=['fcover', 'GEOS3'],
-          agg='W', outfile=None, nt=-1):
+          dist=20, stat='median', para=False, 
+          agg='week', outfile=None, nt=-1):
     
     
     """
@@ -1014,39 +1012,27 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
                     para=True,
                     agg=agg) for p in idx)
     
-
     
-    finaldf = pd.DataFrame(datalist)
-    
-    if agg == 'M':
-        finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-    else:
-        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
-        
     #TODO There must be a more elegant/efficient way
-    # listarrs = [d.to_numpy().flatten() for d in datalist]
-    # finaldf = pd.DataFrame(np.vstack(listarrs))
-    # del listarrs
+    listarrs = [d.to_numpy().flatten() for d in datalist]
+    finaldf = pd.DataFrame(np.vstack(listarrs))
+    del listarrs
     
-    # colstmp = []
-    # # this seems inefficient
-    # times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-    # for b in bandList:
-    #     tmp = [b+"-"+ t for t in times]
-    #     colstmp.append(tmp)
-    # # apperently quickest
-    # colsfin = list(chain.from_iterable(colstmp))
-     
-    # finaldf.columns = colsfin
+    colstmp = []
+    bandlist = ['G', 'F']
+    # this seems inefficient, but gets the job done as simply chucking the list
+    # of dfs as pd.Dataframe does not work
+    if agg == 'month':
+        times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+    else:
+        times = datalist[0].columns.strftime("%y-%m-%d").tolist()
+    for b in bandlist:
+        tmp = [b+"-"+ t for t in times]
+        colstmp.append(tmp)
+    # apperently quickest
+    colsfin = list(chain.from_iterable(colstmp))
+    finaldf.columns = colsfin
 
-
-    finaldf.columns = ["b-"+c for c in finaldf.columns]
-
-    # for some reason merge no longer working due to na error when there is none
-    # hence concat. If they are in correct order no reason to worry as
-    # no index is present in the ndvi df anyway. 
-    #newdf = pd.merge(gdf, finaldf, on=gdf.index)
-    
     # idx must be unique so make it the gdf one
     finaldf.index = gdf.index 
     newdf = pd.concat([gdf, finaldf], axis=1)
@@ -1059,7 +1045,7 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
 
 def _s2_tseries(geometry, start_date='2016-01-01',
                end_date='2016-12-31', dist=20, 
-               stat='median', cloud_filter=60, bandlist='NDVI', para=False,
+               stat='median', cloud_filter=60, bandlist=['NDVI'], para=False,
                agg='month'):
     
     """
@@ -1084,8 +1070,8 @@ def _s2_tseries(geometry, start_date='2016-01-01',
     cloud_filter: int
              whether to mask cloud
     
-    bandlist: str or List
-             the bands to use as time series (only one for now!) Lists to come
+    bandlist: List of string(s)
+             the bands to use as time series 
 
     agg: string
             aggregate to... 'week', 'month'
@@ -1134,7 +1120,7 @@ def _s2_tseries(geometry, start_date='2016-01-01',
     #     harmonic_regress(S2, dependent=band, harmonics=3)
     
     
-    S2final = harmonic_regress(S2, dependent=bandlist, harmonics=3) 
+    S2final = harmonic_regress(S2, dependent='NDVI', harmonics=3) 
     
     #No longer using pandas as no need
     ts = wxee.TimeSeries(S2final).select('fitted')
@@ -1188,10 +1174,11 @@ def _s2_tseries(geometry, start_date='2016-01-01',
     
     # May change to this for merging below
     df = df.set_index(df['Date'])
-
+    
+    nd = df['fitted']  # change this in the harmonic code....
     # due to the occasional bug being an object
     # if bandlist == None:
-    nd = pd.to_numeric(pd.Series(df['fitted']))
+    # nd = pd.to_numeric(pd.Series(df['fitted']))
     # elif bandlist != None:
     #     #TODO why have done the above when it is simpler to do the below
     #     bandlist.append('NDVI')
@@ -1205,7 +1192,7 @@ def _s2_tseries(geometry, start_date='2016-01-01',
 def S2_ts(inshp, reproj=False,
           start_date='2016-01-01', end_date='2016-12-31', dist=20, 
           stat='max', cloud_filter=60, 
-          bandlist='NDVI', para=False, outfile=None, nt=-1,
+          bandlist=['NDVI'], para=False, outfile=None, nt=-1,
                agg='month'):
     
     
@@ -1231,8 +1218,8 @@ def S2_ts(inshp, reproj=False,
     dist: int
              the distance around point e.g. 20m
     
-    bandList: str or List
-             the bands to use as time series (only one for now!) Lists to come
+    bandList: List of str
+             the bands to use as time series 
              
     cloud_filter: int
              the acceptable cloudiness per pixel in addition to prev arg
@@ -1282,36 +1269,37 @@ def S2_ts(inshp, reproj=False,
                     para=True,
                     agg=agg) for p in idx) 
     
-    # if bandlist != None:
+    if len(bandlist) > 1:
         
-    #     #TODO There must be a more elegant/efficient way
-    #     listarrs = [d.to_numpy().flatten() for d in datalist]
-    #     finaldf = pd.DataFrame(np.vstack(listarrs))
-    #     del listarrs
+        #TODO There must be a more elegant/efficient way
+        listarrs = [d.to_numpy().flatten() for d in datalist]
+        finaldf = pd.DataFrame(np.vstack(listarrs))
+        del listarrs
         
-    #     colstmp = []
-    #     # this seems inefficient
-    #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-    #     for b in bandlist:
-    #         tmp = [b+"-"+ t for t in times]
-    #         colstmp.append(tmp)
-    #     # apperently quickest
-    #     colsfin = list(chain.from_iterable(colstmp))
+        colstmp = []
+        # this seems inefficient
+        if agg == 'month':
+            times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+        else:
+            times = datalist[0].columns.strftime("%y-%m-%d").tolist()
+        for b in bandlist:
+            tmp = [b+"-"+ t for t in times]
+            colstmp.append(tmp)
+        # apperently quickest
+        colsfin = list(chain.from_iterable(colstmp))
         
-    #     finaldf.columns = colsfin
+        finaldf.columns = colsfin
 
         
-    # else:
-    
-    finaldf = pd.DataFrame(datalist)
-        
-    if agg == 'M':
-        finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
     else:
-        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
     
-
-        finaldf.columns = ["n-"+c for c in finaldf.columns]
+        finaldf = pd.DataFrame(datalist)
+            
+        if agg == 'month':
+            finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
+        else:
+            finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+            finaldf.columns = ["n-"+c for c in finaldf.columns]
 
     # for some reason merge no longer working due to na error when there is none
     # hence concat. If they are in correct order no reason to worry as
