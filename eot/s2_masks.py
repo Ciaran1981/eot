@@ -1,9 +1,11 @@
 import ee 
 
+"""
+Taken from the soilwatch javascript (credit to them) - and rewritten in the python api by Ciaran Robb
 # ****************************************************************************************************************** #
 # **************** Apply masking procedures to Sentinel-2 Image Collection using GEE public assets ***************** #
 # ****************************************************************************************************************** #
-
+"""
 # Global Cloud Masking parameters
 cld_prb_thresh = 40#; # Cloud probability threshold to mask clouds. 40% is the default value of s2cloudless
 cloud_filter = 60#; # Threshold on sentinel-2 Metadata field determining whether cloud pixel percentage in image

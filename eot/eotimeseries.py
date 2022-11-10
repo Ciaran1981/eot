@@ -949,8 +949,8 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # stop the stupid warning
       # default='warn'
     # this seems to be
-    #bs['GEOS3'] = bs.fillna(0)
-    #bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
+    bs['GEOS3'] = bs.fillna(0)
+    bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
     # For entry to a shapefile must be this way up
     # this not working when in main func below
@@ -1098,7 +1098,8 @@ def _s2_tseries(geometry, start_date='2016-01-01',
                                '2018': 'COPERNICUS/S2',
                                '2019': 'COPERNICUS/S2_SR',
                                '2020': 'COPERNICUS/S2_SR',
-                               '2021': 'COPERNICUS/S2_SR'})
+                               '2021': 'COPERNICUS/S2_SR',
+                               '2022': 'COPERNICUS/S2_SR'})
 
     # date range dict
     dts = {'start': start_date, 'end': end_date}
@@ -1191,7 +1192,7 @@ def _s2_tseries(geometry, start_date='2016-01-01',
 
 def S2_ts(inshp, reproj=False,
           start_date='2016-01-01', end_date='2016-12-31', dist=20, 
-          stat='max', cloud_filter=60, 
+          stat='median', cloud_filter=60, 
           bandlist=['NDVI'], para=False, outfile=None, nt=-1,
                agg='month'):
     
@@ -1278,10 +1279,10 @@ def S2_ts(inshp, reproj=False,
         
         colstmp = []
         # this seems inefficient
-        if agg == 'month':
-            times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-        else:
-            times = datalist[0].columns.strftime("%y-%m-%d").tolist()
+        # if agg == 'month':
+        #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+        # else:
+        times = datalist[0].columns.strftime("%y-%m-%d").tolist()
         for b in bandlist:
             tmp = [b+"-"+ t for t in times]
             colstmp.append(tmp)
@@ -1294,12 +1295,16 @@ def S2_ts(inshp, reproj=False,
     else:
     
         finaldf = pd.DataFrame(datalist)
-            
-        if agg == 'month':
-            finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-        else:
-            finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
-            finaldf.columns = ["n-"+c for c in finaldf.columns]
+        
+        # Unfortunately monthly aggs do not always occur via GEE it seems
+        # can result in duplicate values eg 2 aprils then geopandas won't
+        # write the file
+        # if agg == 'month':
+        #     finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
+        #     finaldf.columns = ["n-"+c for c in finaldf.columns]
+        #else:
+        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+        finaldf.columns = ["n-"+c for c in finaldf.columns]
 
     # for some reason merge no longer working due to na error when there is none
     # hence concat. If they are in correct order no reason to worry as
@@ -1369,7 +1374,7 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     if year != None:
         if len(year) > 2:
             raise ValueError('year must be last 2 digits eg 16 for 2016') 
-        yrcols = [y for y in yrcols if year in y]
+        yrcols = [y for y in yrcols if year in y[0:4]]
         dtrange = pd.date_range(start='20'+year+'-01-01',
                                 end='20'+year+'-12-31',
                                 freq=freq)
@@ -1379,20 +1384,20 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
         # this code is dire  due to way i wrote other stuff from gee plus
         # ad hoc changes as I go
         #TODO alter this crap
-        if freq == 'M':
-            startd = yrcols[0][-5:]
-            startd = '20'+startd+'-01'
-            # this seems stupid
-            endd = yrcols[-1:][0][-5:]
-            endd = '20'+endd[0:2]+'-12-31'
-            dtrange = pd.date_range(start=startd, end=endd, freq=freq)
+        # if freq == 'M':
+        #     startd = yrcols[0][-5:]
+        #     startd = '20'+startd+'-01'
+        #     # this seems stupid
+        #     endd = yrcols[-1:][0][-5:]
+        #     endd = '20'+endd[0:2]+'-12-31'
+        #     dtrange = pd.date_range(start=startd, end=endd, freq=freq)
             
-        else:
-            startd = yrcols[0][-8:]
-            startd = '20'+startd
-            endd = yrcols[-1:][0][-5:]
-            endd = '20'+endd
-
+        #else:
+        startd = yrcols[0][-8:]
+        startd = '20'+startd
+        endd = yrcols[-1:][0][-8:]
+        endd = '20'+endd
+        #dtrange = pd.date_range(start=startd, end=endd, freq=freq)
 
             
     # TODO - this is crap really needs replaced....
@@ -1400,13 +1405,13 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     
     new = ndplotvals.transpose()
     
-    if freq != 'M':
-        new['Date'] = new.index
-        new['Date'] = new['Date'].str.replace(name,'20')
-        new['Date'] = new['Date'].str.replace('_','0')
-        new['Date'] = pd.to_datetime(new['Date'])
-    else:
-        new['Date'] = dtrange
+    #if freq != 'M':
+    new['Date'] = new.index
+    new['Date'] = new['Date'].str.replace(name,'20')
+    new['Date'] = new['Date'].str.replace('_','0')
+    new['Date'] = pd.to_datetime(new['Date'])
+    #else:
+    #new['Date'] = dtrange
     
     
     new = new.set_index('Date')
@@ -1490,6 +1495,7 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
     # Quick dirty time series plotting of crops with corresponding stages
     
 
+    #TODO potentially drop this as could be donw outside func
     sqr = df.loc[df[group].isin(index)]
     
     yrcols = [y for y in sqr.columns if name in y]
@@ -1497,21 +1503,30 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
     if year != None:
         if len(year) > 2:
             raise ValueError('year must be last 2 digits eg 16 for 2016') 
-        yrcols = [y for y in yrcols if year in y]
+        yrcols = [y for y in yrcols if year in y[0:4]]
         dtrange = pd.date_range(start='20'+year+'-01-01',
                                 end='20'+year+'-12-31',
-                                freq='M')
+                                freq=freq)
     else:
-        # set the dtrange......
-        # this code is dire but due to way i wrote other stuff from gee
         
-        if freq == 'M':
-            startd = yrcols[0][-5:]
-            startd = '20'+startd+'-01'
-            # this seems stupid
-            endd = yrcols[-1:][0][-8:]
-            endd = '20'+endd[0:2]+'-12-31'
-            dtrange = pd.date_range(start=startd, end=endd, freq=freq)
+        # set the dtrange......
+        # this code is dire  due to way i wrote other stuff from gee plus
+        # ad hoc changes as I go
+        #TODO alter this crap
+        # if freq == 'M':
+        #     startd = yrcols[0][-5:]
+        #     startd = '20'+startd+'-01'
+        #     # this seems stupid
+        #     endd = yrcols[-1:][0][-5:]
+        #     endd = '20'+endd[0:2]+'-12-31'
+        #     dtrange = pd.date_range(start=startd, end=endd, freq=freq)
+            
+        #else:
+        startd = yrcols[0][-8:]
+        startd = '20'+startd
+        endd = yrcols[-1:][0][-8:]
+        endd = '20'+endd
+        #dtrange = pd.date_range(start=startd, end=endd, freq=freq)
 
             
     # TODO - this is crap really needs replaced....
@@ -1519,16 +1534,18 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
     
     new = ndplotvals.transpose()
     
-    if freq != 'M':
-        new['Date'] = new.index
-        new['Date'] = new['Date'].str.replace(name+'-','20')
-        new['Date'] = new['Date'].str.replace('_','0')
-        new['Date'] = pd.to_datetime(new['Date'])
-    else:
-        new['Date'] = dtrange
+    #if freq != 'M':
+    new['Date'] = new.index
+    new['Date'] = new['Date'].str.replace(name,'20')
+    new['Date'] = new['Date'].str.replace('_','0')
+    new['Date'] = pd.to_datetime(new['Date'])
+    #else:
+    #new['Date'] = dtrange
+    
     
     new = new.set_index('Date')
-    new.columns=[name]
+    
+    #new.columns=[name]
     
     # it is not scaled to put lines between months....
     # but the line doesn't plot so sod this
@@ -1635,7 +1652,215 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
     #ax.text(midtime, 0.5, " crop", ha='left', **style)
     plt.show()
 
+def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None,
+              fill=False, freq='M'):
+    
+    """
+    Plot time series per poly or point eg for S2 ndvi, S1, or met var
+    
+    Parameters
+    ----------
+    
+    df: byte
+        input pandas/geopandas df
+    
+    group: string
+          the attribute to group by
+          
+    index: list
+            the index of interest
+            
+    name: string
+            the name of interest
+            
+    crop: string
+            the crop of interest
+            
+    legend_col: string
+            the column that legend lines will be labeled by
+    
+    year: string
+            the year to summarise e.g. '16' for 2016 (optional)
+            
+    title: string
+            plot title
 
+    fill: bool
+            fill the area between plot lines 
+            (this a bit imprecise in some areas)
+    
+    """
+    
+    # Quick dirty time series plotting of crops with corresponding stages
+
+    sqr = df.loc[df[group].isin(index)]
+    
+    yrcols = [y for y in sqr.columns if 'F-' in y]
+    soilcols = [s for s in sqr.columns if 'G-' in s]
+    
+    if year != None:
+        if len(year) > 2:
+            raise ValueError('year must be last 2 digits eg 16 for 2016') 
+        yrcols = [y for y in yrcols if year in y]
+        dtrange = pd.date_range(start='20'+year+'-01-01',
+                                end='20'+year+'-12-31',
+                                freq='M')
+    else:
+        # set the dtrange......
+        # this code is dire but due to way i wrote other stuff from gee
+        
+        if freq == 'M':
+            startd = yrcols[0][-5:]
+            startd = '20'+startd+'-01'
+            # this seems stupid
+            endd = yrcols[-1:][0][-8:]
+            endd = '20'+endd[0:2]+'-12-31'
+            dtrange = pd.date_range(start=startd, end=endd, freq=freq)
+
+            
+    # TODO - this is crap really needs replaced....
+    ndplotvals = sqr[yrcols]
+    soilplotvals = sqr[soilcols]
+    
+    slnew = soilplotvals.transpose()
+    new = ndplotvals.transpose()
+    
+    def _doit(new, name):
+        new['Date'] = new.index
+        new['Date'] = new['Date'].str.replace(name,'20')
+        new['Date'] = new['Date'].str.replace('_','0')
+        new['Date'] = pd.to_datetime(new['Date'])
+        return new
+        
+    if freq != 'M':
+        new = _doit(new, "F-")
+        slnew = _doit(slnew, "G-")
+        
+    else:
+        new['Date'] = dtrange
+        slnew['Date'] = dtrange
+    
+    new = new.set_index('Date')
+    slnew = slnew.set_index('Date')
+    slbare = slnew[slnew.values>0]
+    
+    soildates = slbare.index
+    
+    #new.columns=[name, name]
+    
+    # it is not scaled to put lines between months....
+    # but the line doesn't plot so sod this
+#    days = pd.date_range(start='20'+year+'-01-01',
+#                                end='20'+year+'-12-31',
+#                                freq='D')
+#    
+#    new = new.reindex(days)
+#   and before you try it - dropna just returns the axis to monthly.
+    
+#    # to add the index as the legend
+    ax = new.plot.line(title=title)
+
+    if fill == True:
+         minr = new.min(axis=1, numeric_only=True)
+         maxr = new.max(axis=1, numeric_only=True)
+         ax.fill_between(new.index, minr, maxr, alpha=0.1, label='min')
+    
+    if year is None:
+        # TODO this could be adapted to highlight the phenostages with their
+        # labels
+        xpos = [pd.to_datetime(startd), pd.to_datetime(endd)]
+        for xc in xpos:
+            ax.axvline(x=xc, color='k', linestyle='--', label='pish')
+        ax.axvspan(xpos[0], xpos[1], facecolor='gray', alpha=0.2)
+
+    ax.legend(labels=sqr[group].to_list(), loc='center left', 
+              bbox_to_anchor=(1.0, 0.5))
+   
+    # So here I just need the end of the bare period as obviously I have the start
+    
+    
+    yr = "20"+year
+    
+    crop_dict = soildates
+    
+    for p in soildates:
+         plt.axvline(p, color='k', linestyle='--')
+    # The crop dicts -approx patterns of crop growth....
+    # this is a hacky mess for now
+    # Problem is axis is monthly from previous
+    # so changing to days or weeks doesn't work, including half months
+    # crop_dict = {"SP BA": [pd.to_datetime(yr+"-04-01"), pd.to_datetime(yr+"-05-01"),
+    #                        pd.to_datetime(yr+"-06-01"), pd.to_datetime(yr+"-08-01"),
+    #                        pd.to_datetime(yr+"-09-01")]}
+    
+    
+    # crop_dict = {"SP BA": [pd.to_datetime(yr+"-04-01"), pd.to_datetime(yr+"-05-01"),
+    #                        pd.to_datetime(yr+"-06-01"), pd.to_datetime(yr+"-08-01"),
+    #                        pd.to_datetime(yr+"-09-01")],
+    #              "SP BE": [],
+    #              "SP Oats": [],
+    #              "SP WH": [pd.to_datetime(yr+"-04-01"), pd.to_datetime(yr+"-05-01"),
+    #                        pd.to_datetime(yr+"-06-01"), pd.to_datetime(yr+"-08-01"),
+    #                        pd.to_datetime(yr+"-09-01")],
+    #              "W Rye": [],
+    #              "W Spelt": [],
+    #              "W WH": []}
+    
+    # these are placeholders and NOT correct!!!
+    # mind the list much be same length otherwise zip will stop at end of shortest
+    # also the last entry is of course not between lines
+    # crop_seq = {"SP BA": [' Em', ' Stem' ,' Infl',
+    #                        ' Flr>\n Gr>\n Sen',
+    #                        ""],
+    #              "SP BE": [],
+    #              "SP Oats": [],
+    #              "SP WH": [' Em', ' Stem' ,' Infl',
+    #                        ' Flr>\n Gr> \nSen',
+    #                        ""],
+    #              "W Rye": [],
+    #              "W Spelt": [],
+    #              "W WH": []}
+    
+    # # rainbow
+    # clrs = cm.rainbow(np.linspace(0, 1, len(crop_dict[crop])))
+    
+    # #for the text 
+    # style = dict(size=10, color='black')
+    
+    
+    #useful stuff here
+    #https://jakevdp.github.io/PythonDataScienceHandbook/04.09-text-and-annotation.html
+    
+    # this is also a mess
+    # Gen the min of mins for the position of text on y axis
+    minr = new.min(axis=1, numeric_only=True)
+    btm = minr.min() - (minr.min() / 2)
+    for xc, nm in zip(crop_dict[crop], crop_seq[crop]):
+        ax.axvline(x=xc, color='k', linestyle='--')
+        ax.text(xc, minr.min(), " "+nm, ha='left', **style)
+        # can't get this to work as yet
+#        ax.annotate(nm, xy=(xc, 0.1),
+#                    xycoords='data', bbox=dict(boxstyle="round", fc="none", ec="gray"),
+#                    xytext=(10, -40), textcoords='offset points', ha='center',
+#                    arrowprops=dict(arrowstyle="->"), 
+#                    annotation_clip=False)
+   # theend = len(crop_dict[crop])-1
+    
+    for idx, c in enumerate(clrs):
+        if idx == len(clrs)-1:
+            break
+        ax.axvspan(crop_dict[crop][idx], crop_dict[crop][idx+1], 
+                   facecolor=c, alpha=0.1)
+        
+    
+    
+    # so if we take the mid date point we can put the label in the middle
+ 
+    # hmm this does not do what I had hoped, it's not in the middle....
+#    midtime = xpos[0] + (xpos[1] - xpos[0])/2
+    # can cheat by putting a space at the start!!!!
+    #ax.text(midtime, 0.5, " crop", ha='left', **style)
+    plt.show()
 
     
 def _S1_date(entry):
@@ -1918,29 +2143,31 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
                     para=para) for p in idx) 
     
     finaldf = pd.DataFrame(wcld)
-    if agg == 'M':
-        finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-    else:
-        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+    # if agg == 'M':
+    #     finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
+    # else:
+    finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
     
     if polar == 'VVVH':
         # otherwise this screws up searches for only VH etc
         polar = 'S1R'
     
-    if agg != 'M':
+    # if agg != 'M':
     #TODO A mess to be replaced
-        if polar == 'VV':
-            polar = 'V'
-        elif polar == 'VH':
-            polar = 'H'
-        elif polar == 'S1R':
-            polar = 'R'
-        finaldf.columns = [polar+'-'+c for c in finaldf.columns]
-    else:
+    if polar == 'VV':
+        polar = 'V'
+    elif polar == 'VH':
+        polar = 'H'
+    elif polar == 'S1R':
+        polar = 'R'
+    finaldf.columns = [polar+'-'+c for c in finaldf.columns]
+    # else:
 
-        finaldf.columns = [polar+'-'+c for c in finaldf.columns]
+    #     finaldf.columns = [polar+'-'+c for c in finaldf.columns]
         
-    newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    #newdf = pd.merge(gdf, finaldf, on=gdf.index)
+    finaldf.index = gdf.index 
+    newdf = pd.concat([gdf, finaldf], axis=1)
     
     if outfile != None:
         newdf.to_file(outfile)

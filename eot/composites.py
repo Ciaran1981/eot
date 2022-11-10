@@ -2,7 +2,7 @@ import ee
 import math
 
 """
-Module compiling the compositing and time series processing functionalities ported to python from soilwatch with alterations - credit to them fro the original javascript
+Module compiling the compositing and time series processing functionalities ported to python from soilwatch with alterations - credit to them for the original javascript
 
 """
 
@@ -217,32 +217,8 @@ def harmonicRegression(ts, band, harmonics):
   # These also serve as band name suffixes.
   harmonic_frequencies = ee.List.sequence(1, harmonics)
   from_date = ts.first().date()
-
-  # Function to get a sequence of band names for harmonic terms.
-  # lst was formerly list but this is reserved in python
-  # TODO suspect bug is here with conversion of type in list
-  # def _constructBandNames(base, lst):
-      
-  #     # concat 2 strings
-  #     def func_kxv(i):
-  #         # formerly
-  #         return ee.String(base).cat(ee.Number(i).int())
-
-  #     return ee.List(lst).map(func_kxv)
-  
   
   # Construct lists of names for the harmonic terms.
-  # comes up as a list of Longs rather than strings 
-  # when exec getInfo delivers exception due to this
-  # EEException: String.cat, argument 'string2': Invalid type.
-  # Expected type: String.
-  # Actual type: Long.
-  # Actual value: 1
-  # This could be done easly in python then sent over too server
-  # cos_names = _constructBandNames('cos_', harmonic_frequencies)
-  # sin_names = _constructBandNames('sin_', harmonic_frequencies)
-  
-  # the above code canned as it does not work
   # this however does and it is only 4 list entries anyway
   hlist = harmonic_frequencies.getInfo()
   cos_names = ee.List(['cos_' + str(h) for h in hlist])
@@ -277,7 +253,7 @@ def harmonicRegression(ts, band, harmonics):
           sines = time.multiply(frequencies).sin().rename(sin_names)
           return image.addBands(cosines).addBands(sines)
       
-      return funcH#(image, freqs)
+      return funcH
   
   # NOPE!
   # EEException: Image.rename: The number of names (1) must match the number of bands (2).

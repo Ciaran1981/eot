@@ -5,6 +5,14 @@ DAP dwnloads adapted from CEDA templates with additions and changes by Ciaran Ro
 
 The remainder functions for files ftp by Ciaran Robb
 
+IMPORTANT - If met with this:
+
+SSLError: HTTPSConnectionPool(host='slcs.ceda.ac.uk', port=443): 
+Max retries exceeded with url: /onlineca/certificate/ 
+(Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] 
+certificate verify failed: certificate has expired (_ssl.c:1129)')))
+
+delete the certs dir and rerun setup_credentials() or a func that contains it
 ===================
 
 
@@ -34,7 +42,6 @@ CREDENTIALS_FILE_PATH = os.path.join(CERTS_DIR, 'credentials.pem')
 
 TRUSTROOTS_SERVICE = 'https://slcs.ceda.ac.uk/onlineca/trustroots/'
 CERT_SERVICE = 'https://slcs.ceda.ac.uk/onlineca/certificate/'
-
 
 def cert_is_valid(cert_file, min_lifetime=0):
     """

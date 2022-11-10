@@ -35,5 +35,6 @@ dependencies:
     - ContrailOnlineCAClient
 #    - reconvert
     - geetools
+    - pyexcelerate
 #    - geedataset
 

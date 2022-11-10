@@ -5,12 +5,62 @@ Created on Fri May 14 18:40:23 2021
 
 @author: Ciaran Robb
 
-Some gdal utils borrowed from my lib
+Some gdal utils borrowed from my lib and misc funcs
 """
 from osgeo import gdal, ogr, osr
 from tqdm import tqdm
 import os 
 import numpy as np
+import hvplot.xarray
+import holoviews as hv
+import xarray as xr
+from holoviews import opts
+from holoviews import stream
+
+
+def ndvi_roi_plot(xrds):
+    
+    """
+    Plot an interactive time series of NDVI using holoviews where the left pane is
+    the time(z) series cube of imagery and the right a plot of NDVI curves
+    as selected by the user via roi. Intended for use in Jupyter.
+    
+    Parameters
+    ----------
+    
+    xrds: xarray dataset
+          inut xarray image stack - must have dates etc. 
+    """
+    
+    #figure opts
+    opts.defaults(
+    opts.GridSpace(shared_xaxis=True, shared_yaxis=True),
+    opts.Image(cmap='viridis', width=400, height=400),
+    opts.Labels(text_color='white', text_font_size='8pt', text_align='left', text_baseline='bottom'),
+    opts.Path(color='white'),
+    opts.Spread(width=600),
+    opts.Overlay(show_legend=False))
+    
+    ds = hv.Dataset(dsfl)
+    
+    polys = hv.Polygons([])
+    box_stream = streams.BoxEdit(source=polys)
+
+    def roi_curves(data):
+        if not data or not any(len(d) for d in data.values()):
+            return hv.NdOverlay({0: hv.Curve([], 'time', 'NDVI')})
+        
+        curves = {}
+        data = zip(data['x0'], data['x1'], data['y0'], data['y1'])
+        for i, (x0, x1, y0, y1) in enumerate(data):
+            selection = ds.select(x=(x0, x1), y=(y0, y1))
+            curves[i] = hv.Curve(selection.aggregate('time', np.mean))
+        return hv.NdOverlay(curves)
+    
+    hlines = hv.HoloMap({i: hv.VLine(i) for i in range(9)}, 'time') # gives vertical line on plot
+    dmap = hv.DynamicMap(roi_curves, streams=[box_stream])
+    
+    
  
 def _fieldexist(vlyr, field):
     """
