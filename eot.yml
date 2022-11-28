@@ -30,11 +30,13 @@ dependencies:
   - hvplot
   - holoviews
   - geoviews
+  - cdo
+  - rioxarray
 
   - pip:
     - ContrailOnlineCAClient
-#    - reconvert
     - geetools
     - pyexcelerate
-#    - geedataset
+    - git+https://github.com/Ciaran1981/eot
+
 
