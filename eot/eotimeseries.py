@@ -275,7 +275,7 @@ def s2cloudless(collection, start_date, end_date, geom,
                     
     end_date: string
                     end date of time series
-    
+    EEException: Empty date ranges not supported for the current operation.
     geom: string
           an ogr compatible file with an extent
           
@@ -366,8 +366,8 @@ def get_month_ndperc(start_date, end_date, geom, collection="COPERNICUS/S2"):
     
     Returns
     -------
-    
-    GEE collection of monthly NDVI images
+
+    collection of monthly NDVI images
     
     """
     
@@ -476,7 +476,7 @@ def _raster_extent(inras):
     miny = maxy + rgt[5] * rds.RasterYSize
     ext = (minx, miny, maxx, maxy)
     
-    return ext
+
 
 
 def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefile", 
@@ -502,7 +502,7 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
     polytype: string
             ogr comapatible file type (see gdal/ogr docs) default 'ESRI Shapefile'
             ensure your outfile string has the equiv. e.g. '.shp'
-    
+
     geecoord: bool
            optionally convert to WGS84 lat,lon
            
@@ -535,7 +535,8 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
     poly.AddGeometry(ring)
     
     if geecoord == True:
-        # Getting spatial reference of input 
+
+  # Getting spatial reference of input 
         srs = lyr.GetSpatialRef()
     
         # make WGS84 projection reference3
@@ -591,9 +592,70 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
 
     return ootds
 
+def s2collection_ts(start_date, end_date, roi, cloud_filter=60, band='NDVI', 
+                    agg='month'):
+    
+    """
+    Return an smoothed, aggregated ts collection from Sentinel2
+    
+    Parameters
+    ----------
+    
+    start_date: string
+                    start date of time series
+    
+    end_date: string
+                    end date of time series
+    
+    cloud_filter: int
+                    s2 cloudless filter
+    
+    band: string
+            the band selected for harmonic regression
+            
+    agg: string
+          period eg week, month
+    
+    roi: gee geometry
+         a geometry to constrain the collection
+    
+    """
+    
+    # this needs updated yearly - think of something better
+    years = ee.Dictionary({'2016': 'COPERNICUS/S2',
+                                '2017': 'COPERNICUS/S2',
+                                '2018': 'COPERNICUS/S2',
+                                '2019': 'COPERNICUS/S2_SR',
+                                '2020': 'COPERNICUS/S2_SR',
+                                '2021': 'COPERNICUS/S2_SR',
+                                '2022': 'COPERNICUS/S2_SR'})
 
+    # date range dict
+    dts = {'start': start_date, 'end': end_date}
+    date_range_temp = ee.Dictionary(dts)
+    year = start_date[0:4]
 
-def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
+    # Load the Sentinel-2 collection for the time period and area requested
+    s2_cl = loadImageCollection(ee.String(years.get(year)).getInfo(), 
+                                 date_range_temp, roi)
+
+    S2cld = s2cloudless(s2_cl, start_date, end_date, roi,
+                     cloud_filter=cloud_filter)
+    
+    # pointless repetition (should likely go in s2cloudless)
+    S2 = (ee.ImageCollection(S2cld)
+         .spectralIndices([band])) # should more be calculated?
+     
+    S2final = harmonic_regress(S2, dependent=band, harmonics=3) 
+     
+    ts2 = wxee.TimeSeries(S2final).select('fitted')
+    ts_fl2 = ts2.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
+    
+    return ts_fl2
+    
+    
+
+def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
                   attribute='id', scale=20):
     
     
@@ -602,10 +664,9 @@ def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
     
     Parameters
     ----------
-              
-    collection: string
-                    the image collection  best if this is agg'd monthly or 
-                    something
+    
+    inShp: string
+            path to input shapefile
     
     start_date: string
                     start date of time series
@@ -619,6 +680,9 @@ def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
             
     attribute: string
                 the attribute for filtering (required for GEE)
+    
+    scale: int
+            pixel size in metres
                 
     Returns
     -------
@@ -631,36 +695,41 @@ def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
     Unlike the other tseries functions here, this operates server side, meaning
     the bottleneck is in the download/conversion to dataframe.
     
-    This function is not reliable with every image collection at present
-    
     """
-    # Overly elaborate, unreliable and fairly likely to be dumped 
-
-    # shp/json to gee feature here
-    # if #filetype is something:
-    'converting to ee feature'
-    shp = geemap.shp_to_ee(inShp)
-    # else # it is a json:
     
+    shp = geemap.shp_to_ee(inShp)
+    
+    # for constrain im collection
+    poly = extent2poly(inShp, filetype='polygon', outfile=False, 
+                           polytype="ESRI Shapefile",  geecoord=True)
+
+    # this feels silly but don't trust it    
+    roi = ee.Geometry.Polygon(coords=poly['coordinates'])
+    
+    collection = s2collection_ts(start_date, end_date, roi, cloud_filter=60, 
+                                 band=bandnm, agg='month')
     
     # select the band and perform a spatial agg
     # GEE makes things ugly/hard to read
-    def _imfunc(image):
-      return (image.select(bandnm)
+    # I have nested rather than using lambda here and it works
+    def _imfunc(image): 
+        
+        def wrapf(f):
+            return f.set('imageId', image.id())
+        
+        return (image.select('fitted')
         .reduceRegions(
           collection=shp.select([attribute]),
           reducer=ee.Reducer.mean(),
           scale=scale
         )
         .filter(ee.Filter.neq('mean', None))
-        .map(lambda f: f.set('imageId', image.id())))
+        .map(wrapf))
 
     # now map the above over the collection
     # we have a triplet of attributes, which can be rearranged to a table
-    # below,
     triplets = collection.map(_imfunc).flatten()
-    
-    
+
     def _fmt(table, row_id, col_id):
       """
       arrange the image stat values into a table of specified order
@@ -687,23 +756,44 @@ def zonal_tseries(collection, start_date, end_date, inShp, bandnm='NDVI',
       
       return t_oot 
     
-    # run the above to produce the table where the columns are attributes
-    # and the rows the image ID
+    # (of course attribute will appear as a column in the df)
+    #             t          rowid       colid
     table = _fmt(triplets, attribute, 'imageId')
     
     print('converting to pandas df')
     df = geemap.ee_to_pandas(table)
-    # bin the const GEE index
-    # df = df.drop(columns=['system:index'])
     
-    # problem here is the geometry has been retained in a column which we don't want
+    # Now we need to sort the columns by date which are not in order
+    df.sort_index(axis=1, inplace=True)
     
-    #Nope.....
-    #geemap.ee_export_vector(table, outfile)
+    # format the date/veg ind columns
+    names = [c.split(sep='_')[0][0:8] for c in df.columns]
     
+    names = names[:-1] # get rid of attribute
     
+    fnames = [_dodate(n) for n in names]
+    
+    fnames.append(attribute)
+    
+    df.columns = fnames
+    
+    #TODO open gdf & merge, then return and/or write
+    
+    # for a larger table this may be required
+    # task = ee.batch.Export.table.toDrive(table, folder='earthengine', 
+    #                                      fileNamePrefix='zonaltst',
+    #                                      fileFormat='csv')
+
+    # task.start()
+    #TODO
+    # while task.status()['state'] == 'RUNNING':
+    #     print('')
+
     return df
     
+def _dodate(n):
+    oot = n[2:4] +'-'+n[4:6]+'-'+n[6:8]
+    return oot
 
 def points_to_pixel(gdf, espgin='epsg:27700', espgout='epsg:4326'):
     """
@@ -888,6 +978,7 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # This produces smooth curves are they too similar or not from
     # one yr to the next
     # worth remembering it is cover rather than ndvi....
+    #TODO Do we really need fcover particulalrly? Is this slowing it up?
     dep = 'fcover'
     bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
     #No longer using pandas as no need
@@ -948,8 +1039,8 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # to be binary again
     # stop the stupid warning
       # default='warn'
-    # this seems to be
-    bs['GEOS3'] = bs.fillna(0)
+    # this seems to b
+    bs['GEOS3'].fillna(0, inplace=True)
     bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
     # For entry to a shapefile must be this way up
@@ -1019,13 +1110,14 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
     del listarrs
     
     colstmp = []
-    bandlist = ['G', 'F']
+    bandlist = ['g', 'f']
     # this seems inefficient, but gets the job done as simply chucking the list
     # of dfs as pd.Dataframe does not work
-    if agg == 'month':
-        times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-    else:
-        times = datalist[0].columns.strftime("%y-%m-%d").tolist()
+    # if agg == 'month':
+    #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+    # else:
+    # in line w/ s2_ts
+    times = datalist[0].columns.strftime("%y-%m-%d").tolist()
     for b in bandlist:
         tmp = [b+"-"+ t for t in times]
         colstmp.append(tmp)
@@ -1288,7 +1380,10 @@ def S2_ts(inshp, reproj=False,
             colstmp.append(tmp)
         # apperently quickest
         colsfin = list(chain.from_iterable(colstmp))
-        
+        et.S2_ts(s, collection="L2A", start_date=d[0],
+          end_date=d[1], dist=10, cloud_mask=False, stat='perc', ndvi=True, 
+          bandlist=None,
+          cloud_perc=100, para=True, outfile=s)
         finaldf.columns = colsfin
 
         
@@ -1675,7 +1770,7 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
             
     crop: string
             the crop of interest
-            
+           
     legend_col: string
             the column that legend lines will be labeled by
     
@@ -1695,8 +1790,8 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
 
     sqr = df.loc[df[group].isin(index)]
     
-    yrcols = [y for y in sqr.columns if 'F-' in y]
-    soilcols = [s for s in sqr.columns if 'G-' in s]
+    yrcols = [y for y in sqr.columns if 'f-' in y]
+    soilcols = [s for s in sqr.columns if 'g-' in s]
     
     if year != None:
         if len(year) > 2:
@@ -1733,8 +1828,8 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
         return new
         
     if freq != 'M':
-        new = _doit(new, "F-")
-        slnew = _doit(slnew, "G-")
+        new = _doit(new, "f-")
+        slnew = _doit(slnew, "g-")
         
     else:
         new['Date'] = dtrange
@@ -1783,6 +1878,8 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     
     crop_dict = soildates
     
+    clrs = cm.rainbow(np.linspace(0, 1, len(soildates)))
+    
     for p in soildates:
          plt.axvline(p, color='k', linestyle='--')
     # The crop dicts -approx patterns of crop growth....
@@ -1822,7 +1919,7 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     #              "W WH": []}
     
     # # rainbow
-    # clrs = cm.rainbow(np.linspace(0, 1, len(crop_dict[crop])))
+    #clrs = cm.rainbow(np.linspace(0, 1, len(crop_dict[crop])))
     
     # #for the text 
     # style = dict(size=10, color='black')
@@ -1835,9 +1932,9 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     # Gen the min of mins for the position of text on y axis
     minr = new.min(axis=1, numeric_only=True)
     btm = minr.min() - (minr.min() / 2)
-    for xc, nm in zip(crop_dict[crop], crop_seq[crop]):
-        ax.axvline(x=xc, color='k', linestyle='--')
-        ax.text(xc, minr.min(), " "+nm, ha='left', **style)
+    # for xc, nm in zip(crop_dict[crop], crop_seq[crop]):
+    #     ax.axvline(x=xc, color='k', linestyle='--')
+    #     ax.text(xc, minr.min(), " "+nm, ha='left', **style)
         # can't get this to work as yet
 #        ax.annotate(nm, xy=(xc, 0.1),
 #                    xycoords='data', bbox=dict(boxstyle="round", fc="none", ec="gray"),
@@ -1846,18 +1943,18 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
 #                    annotation_clip=False)
    # theend = len(crop_dict[crop])-1
     
-    for idx, c in enumerate(clrs):
-        if idx == len(clrs)-1:
-            break
-        ax.axvspan(crop_dict[crop][idx], crop_dict[crop][idx+1], 
-                   facecolor=c, alpha=0.1)
+    # for idx, c in enumerate(clrs):
+    #     if idx == len(clrs)-1:
+    #         break
+    #     ax.axvspan(crop_dict[crop][idx], crop_dict[crop][idx+1], 
+    #                facecolor=c, alpha=0.1)
         
     
     
     # so if we take the mid date point we can put the label in the middle
  
     # hmm this does not do what I had hoped, it's not in the middle....
-#    midtime = xpos[0] + (xpos[1] - xpos[0])/2
+    # midtime = xpos[0] + (xpos[1] - xpos[0])/2
     # can cheat by putting a space at the start!!!!
     #ax.text(midtime, 0.5, " crop", ha='left', **style)
     plt.show()
