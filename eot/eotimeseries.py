@@ -25,6 +25,7 @@ from eot.s2_masks import addCloudShadowMask, applyCloudShadowMask, addGEOS3Mask,
 from eot.s2_fcover import fcover
 from eot.composites import*
 import math
+from shapely.geometry import box, mapping
 ee.Initialize()
 
 # stop this warning - concerns bs_ funcs at present
@@ -479,7 +480,7 @@ def _raster_extent(inras):
 
 
 
-def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefile", 
+def extent2poly(infile, filetype='polygon', outfile=None, polytype="ESRI Shapefile", 
                    geecoord=False):
     
     """
@@ -518,9 +519,18 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
         
     else:
         # tis a vector
-        vds = ogr.Open(infile)
-        lyr = vds.GetLayer()
-        ext = lyr.GetExtent()
+        if isinstance(infile, str):
+            vds = ogr.Open(infile)
+            lyr = vds.GetLayer()
+            ext = lyr.GetExtent()
+            srs = lyr.GetSpatialRef()
+            
+        elif isinstance(infile, gpd.geodataframe.GeoDataFrame):
+            ext2 = infile.total_bounds
+            ext = [ext2[0], ext2[2], ext2[1], ext2[3]]
+            wk = infile.crs.to_wkt()
+            srs = osr.SpatialReference()
+            srs.ImportFromWkt(wk)
     
     # make the linear ring 
     ring = ogr.Geometry(ogr.wkbLinearRing)
@@ -535,10 +545,7 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
     poly.AddGeometry(ring)
     
     if geecoord == True:
-
-  # Getting spatial reference of input 
-        srs = lyr.GetSpatialRef()
-    
+   
         # make WGS84 projection reference3
         wgs84 = osr.SpatialReference()
         wgs84.ImportFromEPSG(4326)
@@ -547,14 +554,14 @@ def extent2poly(infile, filetype='polygon', outfile=True, polytype="ESRI Shapefi
         transform = osr.CoordinateTransformation(srs, wgs84)
         # apply
         poly.Transform(transform)
-        
+ 
         tproj = wgs84
     else:
         tproj = lyr.GetSpatialRef()
     
     # in case we wish to write it for later....    
     if outfile != None:
-        outfile = infile[:-4]+'extent.shp'
+        #outfile = infile[:-4]+'extent.shp'
         
         out_drv = ogr.GetDriverByName(polytype)
         
@@ -616,10 +623,24 @@ def s2collection_ts(start_date, end_date, roi, cloud_filter=60, band='NDVI',
     agg: string
           period eg week, month
     
-    roi: gee geometry
-         a geometry to constrain the collection
+    roi: gee geometry 
     
     """
+    
+    #if isinstance(roi, str):
+        
+    
+    # # unfinished TODO must incorporate this
+    # # else assume it is a ee geometry
+    # # elif isinstance(roi, ee.geometry.Geometry):
+    # elif isinstance(roi, geopandas.geodataframe.GeoDataFrame):
+    #     # shapely box
+    #     poly = box(*gdf.total_bounds)
+    #     poly = json.dumps(mapping(geom)) # not in correct format....
+        
+   # else:
+        #poly = roi
+    poly = roi
     
     # this needs updated yearly - think of something better
     years = ee.Dictionary({'2016': 'COPERNICUS/S2',
@@ -637,9 +658,9 @@ def s2collection_ts(start_date, end_date, roi, cloud_filter=60, band='NDVI',
 
     # Load the Sentinel-2 collection for the time period and area requested
     s2_cl = loadImageCollection(ee.String(years.get(year)).getInfo(), 
-                                 date_range_temp, roi)
+                                 date_range_temp, poly)
 
-    S2cld = s2cloudless(s2_cl, start_date, end_date, roi,
+    S2cld = s2cloudless(s2_cl, start_date, end_date, poly,
                      cloud_filter=cloud_filter)
     
     # pointless repetition (should likely go in s2cloudless)
@@ -696,17 +717,21 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
     the bottleneck is in the download/conversion to dataframe.
     
     """
+    if isinstance(inShp, str):
+        
+        shp = geemap.shp_to_ee(inShp)
+        
+    elif isinstance(inShp, gpd.geodataframe.GeoDataFrame):
+        
+        shp = geemap.gdf_to_ee(inShp)
     
-    shp = geemap.shp_to_ee(inShp)
+    elif isinstance(inShp, ee.featurecollection.FeatureCollection):
+        
+        shp = inShp
     
-    # for constrain im collection
-    poly = extent2poly(inShp, filetype='polygon', outfile=False, 
-                           polytype="ESRI Shapefile",  geecoord=True)
-
-    # this feels silly but don't trust it    
-    roi = ee.Geometry.Polygon(coords=poly['coordinates'])
+    poly = shp.geometry().bounds()
     
-    collection = s2collection_ts(start_date, end_date, roi, cloud_filter=60, 
+    collection = s2collection_ts(start_date, end_date, poly, cloud_filter=60, 
                                  band=bandnm, agg='month')
     
     # select the band and perform a spatial agg
@@ -771,13 +796,24 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
     
     names = names[:-1] # get rid of attribute
     
-    fnames = [_dodate(n) for n in names]
+    bname = bandnm[0].lower()
+    fnames = [_dodate(n, bname) for n in names]
     
     fnames.append(attribute)
-    
+
     df.columns = fnames
     
     #TODO open gdf & merge, then return and/or write
+    # do we merge it here or do this outside func to stop opening & closing
+    # multiple files?
+    # gdf = gpd.read_file(inshp)
+
+    # newdf = pd.concat([gdf, df], axis=1)
+    
+    # if outfile != None:
+    #     newdf.to_file(outfile) # todo? driver='GPKG', layer='name')
+    
+    # return newdf
     
     # for a larger table this may be required
     # task = ee.batch.Export.table.toDrive(table, folder='earthengine', 
@@ -791,8 +827,9 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
 
     return df
     
-def _dodate(n):
-    oot = n[2:4] +'-'+n[4:6]+'-'+n[6:8]
+def _dodate(n, bandname):
+    # awful
+    oot = bandname + n[2:4] +'-'+n[4:6]+'-'+n[6:8]
     return oot
 
 def points_to_pixel(gdf, espgin='epsg:27700', espgout='epsg:4326'):
@@ -879,7 +916,7 @@ def harmonic_regress(collection, dependent='NDVI', harmonics=3):
                the dependent variable usually a veg index 
                 
     harmonics: int
-               
+               harmonic components
     """
     
     # Credit to Joao Otavio Nascimento Firigato for this implementation
@@ -970,6 +1007,7 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
         # FEature needs to be rebuilt because the backend doesn't accept to map
         # functions that return dictionaries
         return ee.Feature(None, stat_dict)
+    
     # we only need the collection with the masks as a layer
     bs_masked, _, _ = baresoil_collection(geometry, start_date=start_date, 
                                           end_date=end_date, 
@@ -984,8 +1022,13 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     #No longer using pandas as no need
     ts = wxee.TimeSeries(bsfinal).select(['fitted', 'GEOS3'])
     ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
+    
+    #dates = ts_fl.aggregate_array("system:time_start")
+    #dts = dates.getInfo() # not in readable format
+    
                           
     if geometry['type'] == 'Polygon':
+        
         
         # have to choose median to get both the mask(the mask si binary of course)
         # and the fcover
@@ -1043,11 +1086,29 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     bs['GEOS3'].fillna(0, inplace=True)
     bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
+    #FIX
+    # needs a datetime index not a normal index
+    
+    #bs = _fixgaps(bs)
+    
     # For entry to a shapefile must be this way up
     # this not working when in main func below
     # AttributeError: 'RangeIndex' object has no attribute 'strftime'
     # return (pd.to_numeric(bs.transpose()), pd.to_numeric(fcover.transpose()))
     return bs.transpose()#, fcover.transpose()
+
+
+def _fixgaps(d):
+    
+    #chk_rng = pd.date_range(start_date, end_date, freq='M')
+    # the date is the index if I transpose it
+    #yip = d.transpose()
+    yip = yip.resample('M').mean()
+    # change to end of month to be inline with pd
+    yip.index = yip.index+pd.offsets.MonthEnd(0)
+    
+    # there may now be duplicates w
+    return yip
 
 def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31', 
           dist=20, stat='median', para=False, 
@@ -1103,8 +1164,14 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
                     para=True,
                     agg=agg) for p in idx)
     
-    
+    # The origin of the issue is there are multiple dates in the same month
+    # which should in theory not be happening in the previous aggs...
+
+    # it has got messy
+    # this is incredibly slow on even small data
+
     #TODO There must be a more elegant/efficient way
+    
     listarrs = [d.to_numpy().flatten() for d in datalist]
     finaldf = pd.DataFrame(np.vstack(listarrs))
     del listarrs
@@ -1380,10 +1447,7 @@ def S2_ts(inshp, reproj=False,
             colstmp.append(tmp)
         # apperently quickest
         colsfin = list(chain.from_iterable(colstmp))
-        et.S2_ts(s, collection="L2A", start_date=d[0],
-          end_date=d[1], dist=10, cloud_mask=False, stat='perc', ndvi=True, 
-          bandlist=None,
-          cloud_perc=100, para=True, outfile=s)
+
         finaldf.columns = colsfin
 
         
@@ -1746,6 +1810,13 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
     # can cheat by putting a space at the start!!!!
     #ax.text(midtime, 0.5, " crop", ha='left', **style)
     plt.show()
+    
+def _doit(new, name):
+    new['Date'] = new.index
+    new['Date'] = new['Date'].str.replace(name,'20')
+    new['Date'] = new['Date'].str.replace('_','0')
+    new['Date'] = pd.to_datetime(new['Date'])
+    return new
 
 def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None,
               fill=False, freq='M'):
@@ -1786,54 +1857,44 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     
     """
     
-    # Quick dirty time series plotting of crops with corresponding stages
+    # Quick dirty time series plotting of bare soil & fcover
+    #TODO need tick mark bare soil to match color of fcover line, or be
+    # annotated
 
-    sqr = df.loc[df[group].isin(index)]
+    #write plot only when bare soil occured and the coincident fcover
+    b = df.filter(regex='g-')
+    n = df.filter(regex='f-')
+
+    # subset
+    sub = b[b.values==1]
+    idx = sub.index.tolist()
+    bsub = b[b.values==1]
+    nsub = n.iloc[sub.index.tolist()]
     
-    yrcols = [y for y in sqr.columns if 'f-' in y]
-    soilcols = [s for s in sqr.columns if 'g-' in s]
+    yrcols = [y for y in bsub.columns if 'g-' in y]
     
-    if year != None:
-        if len(year) > 2:
-            raise ValueError('year must be last 2 digits eg 16 for 2016') 
-        yrcols = [y for y in yrcols if year in y]
-        dtrange = pd.date_range(start='20'+year+'-01-01',
-                                end='20'+year+'-12-31',
-                                freq='M')
-    else:
-        # set the dtrange......
-        # this code is dire but due to way i wrote other stuff from gee
-        
-        if freq == 'M':
-            startd = yrcols[0][-5:]
-            startd = '20'+startd+'-01'
-            # this seems stupid
-            endd = yrcols[-1:][0][-8:]
-            endd = '20'+endd[0:2]+'-12-31'
-            dtrange = pd.date_range(start=startd, end=endd, freq=freq)
+    slnew = bsub.transpose()
+    new = nsub.transpose()
+    
+    new = _doit(new, "f-")
+    slnew = _doit(slnew, "g-")
 
             
     # TODO - this is crap really needs replaced....
-    ndplotvals = sqr[yrcols]
-    soilplotvals = sqr[soilcols]
+    # ndplotvals = sqr[yrcols]
+    # soilplotvals = sqr[soilcols]
     
-    slnew = soilplotvals.transpose()
-    new = ndplotvals.transpose()
+    # slnew = soilplotvals.transpose()
+    # new = ndplotvals.transpose()
     
-    def _doit(new, name):
-        new['Date'] = new.index
-        new['Date'] = new['Date'].str.replace(name,'20')
-        new['Date'] = new['Date'].str.replace('_','0')
-        new['Date'] = pd.to_datetime(new['Date'])
-        return new
         
-    if freq != 'M':
-        new = _doit(new, "f-")
-        slnew = _doit(slnew, "g-")
+    #if freq != 'M':
+    new = _doit(new, "f-")
+    slnew = _doit(slnew, "g-")
         
-    else:
-        new['Date'] = dtrange
-        slnew['Date'] = dtrange
+    # else:
+    #     new['Date'] = dtrange
+    #     slnew['Date'] = dtrange
     
     new = new.set_index('Date')
     slnew = slnew.set_index('Date')
@@ -1860,21 +1921,19 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
          maxr = new.max(axis=1, numeric_only=True)
          ax.fill_between(new.index, minr, maxr, alpha=0.1, label='min')
     
-    if year is None:
+    #if year is None:
         # TODO this could be adapted to highlight the phenostages with their
         # labels
-        xpos = [pd.to_datetime(startd), pd.to_datetime(endd)]
-        for xc in xpos:
-            ax.axvline(x=xc, color='k', linestyle='--', label='pish')
-        ax.axvspan(xpos[0], xpos[1], facecolor='gray', alpha=0.2)
+    # this is not doing anything useful for soil plot
+    # xpos = [pd.to_datetime(startd), pd.to_datetime(endd)]
+    # for xc in xpos:
+    #     ax.axvline(x=xc, color='k', linestyle='--', label='pish')
+    # ax.axvspan(xpos[0], xpos[1], facecolor='gray', alpha=0.2)
 
-    ax.legend(labels=sqr[group].to_list(), loc='center left', 
+    ax.legend(labels=df[group].to_list(), loc='center left', 
               bbox_to_anchor=(1.0, 0.5))
    
     # So here I just need the end of the bare period as obviously I have the start
-    
-    
-    yr = "20"+year
     
     crop_dict = soildates
     
@@ -1947,7 +2006,7 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     #     if idx == len(clrs)-1:
     #         break
     #     ax.axvspan(crop_dict[crop][idx], crop_dict[crop][idx+1], 
-    #                facecolor=c, alpha=0.1)
+    #                 facecolor=c, alpha=0.1)
         
     
     
