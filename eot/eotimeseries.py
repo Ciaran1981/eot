@@ -1021,6 +1021,8 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
     #No longer using pandas as no need
     ts = wxee.TimeSeries(bsfinal).select(['fitted', 'GEOS3'])
+    # there is a tendecy to lose months here - wonder if pandas agg
+    # would be better
     ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
     
     #dates = ts_fl.aggregate_array("system:time_start")
@@ -1098,7 +1100,17 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     return bs.transpose()#, fcover.transpose()
 
 
-def _fixgaps(d):
+def _fixgaps(d, stat, agg):
+    
+    if stat == 'max':
+        d = d.resample(rule=agg).max()
+    if stat == 'perc':
+        # avoid potential outliers - not relevant to SAR....
+        d = d.resample(rule=agg).quantile(.95)
+    if stat == 'mean':
+        d = d.resample(rule=agg).mean()
+    if stat == 'median':
+        d = d.resample(rule=agg).median()
     
     #chk_rng = pd.date_range(start_date, end_date, freq='M')
     # the date is the index if I transpose it
