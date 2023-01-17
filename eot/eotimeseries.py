@@ -904,7 +904,7 @@ def simplify(fc):
 def harmonic_regress(collection, dependent='NDVI', harmonics=3):
     
     """
-    Fit a harmonic regression to a gappy time series using GEE
+    Fit a harmonic regression to smooth a time series using GEE
     
     Parameters
     ----------
@@ -968,7 +968,7 @@ def harmonic_regress(collection, dependent='NDVI', harmonics=3):
 
 
 def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=20, 
-               stat='median', para=False, bandList=['GEOS3', 'fitted'],
+               stat='mean', para=False, bandList=['GEOS3', 'fitted'],
                agg='week'):
     
     """
@@ -1016,14 +1016,17 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # This produces smooth curves are they too similar or not from
     # one yr to the next
     # worth remembering it is cover rather than ndvi....
+    
     #TODO Do we really need fcover particulalrly? Is this slowing it up?
+    # Tempting to remove it as using the max stat is making it pointless 
     dep = 'fcover'
     bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
     #No longer using pandas as no need
     ts = wxee.TimeSeries(bsfinal).select(['fitted', 'GEOS3'])
-    # there is a tendecy to lose months here - wonder if pandas agg
-    # would be better
-    ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.median())
+    
+    # this must be maximum to retain the baresoil binary values
+    # this does render the fcover pointless as you need the average of that
+    ts_fl = ts.aggregate_time(frequency=agg, reducer=ee.Reducer.max())
     
     #dates = ts_fl.aggregate_array("system:time_start")
     #dts = dates.getInfo() # not in readable format
@@ -1032,16 +1035,37 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     if geometry['type'] == 'Polygon':
         
         
-        # have to choose median to get both the mask(the mask si binary of course)
-        # and the fcover
-        fun = ee.Reducer.median()
+        # have to choose median to get both the mask(the mask is binary of course)
+        # and the fcover 
+        # mean gives the proportion of polygon covered so maybe reconsider the
+        # above
+        if stat == 'mean':
+            fun = ee.Reducer.mean()
+        elif stat == 'median':
+            fun = ee.Reducer.median()
+        elif stat == 'max':
+            fun = ee.Reducer.max()
+        elif stat == 'min':
+            fun = ee.Reducer.min()
+        elif stat == 'perc':
+            # for now as don't think there is equiv
+            fun = ee.Reducer.mean()
+        else:
+            raise ValueError('Must be one of mean, median, max, or min')
         # ideal would be mode but this is not suitable for fcover
         # don't want to calculate this twice after all as it will slow things
 
         geomee = ee.Geometry.Polygon(geometry['coordinates'])
         
-        
+        # 23secs for monthly 4 yrs
+        # 27 secs for weekly 
+        # 30 secs for all dates 4 yrs
+        #start = timeit.default_timer()
         bsList = ts_fl.filterBounds(geomee).map(_reduce_region).getInfo()
+        #stop = timeit.default_timer()
+        #print((stop - start)) 
+        
+        
         bsList = simplify(bsList)
         
         df = pd.DataFrame(bsList)
@@ -1085,23 +1109,36 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # stop the stupid warning
       # default='warn'
     # this seems to b
+
     bs['GEOS3'].fillna(0, inplace=True)
-    bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
-    #FIX
-    # needs a datetime index not a normal index
     
-    #bs = _fixgaps(bs)
+    if stat == 'max':
+        bs['GEOS3'] = np.ceil(bs['GEOS3']).astype(int)
     
-    # For entry to a shapefile must be this way up
-    # this not working when in main func below
-    # AttributeError: 'RangeIndex' object has no attribute 'strftime'
-    # return (pd.to_numeric(bs.transpose()), pd.to_numeric(fcover.transpose()))
-    return bs.transpose()#, fcover.transpose()
+
+    pdagg = agg[0].capitalize()
+    
+    # create an even ts as sometimes all wks/mnths do not appear in localities
+    # Always take the temporal max. To get the spatial proportion of a field
+    # take the spatial average of the binary values
+    bs = _fixgaps(bs, pdagg, 'max', start_date, end_date)
+    
+    
+    return bs.transpose()
 
 
-def _fixgaps(d, stat, agg):
+def _fixgaps(d, agg, stat, start_date, end_date):
     
+    # Issue is with S2, where there don't appear to be imgs for certain locations
+    # at certain times
+    # TODO this is still problemtatic - don't ken why it occurs
+    # fixes gaps within but not at the beggining of ts. 
+    # it may be the 
+    
+    
+    # ts from GEE often end up with months missing and 2 dates in one month 
+    # instead. Hence this to sort it out
     if stat == 'max':
         d = d.resample(rule=agg).max()
     if stat == 'perc':
@@ -1112,15 +1149,27 @@ def _fixgaps(d, stat, agg):
     if stat == 'median':
         d = d.resample(rule=agg).median()
     
-    #chk_rng = pd.date_range(start_date, end_date, freq='M')
-    # the date is the index if I transpose it
-    #yip = d.transpose()
-    yip = yip.resample('M').mean()
     # change to end of month to be inline with pd
-    yip.index = yip.index+pd.offsets.MonthEnd(0)
+    d.index = d.index+pd.offsets.MonthEnd(0)
     
-    # there may now be duplicates w
-    return yip
+    # interpolate the nan gaps
+    d = d.interpolate()
+    
+    # Hack......
+    chk_rng = pd.DataFrame(pd.date_range(start_date, end_date, freq='M'),
+                           columns=['Date'])
+    if chk_rng['Date'].size > d.index.size:
+        
+        d = chk_rng.merge(d, how='left', left_on='Date', right_on=d.index)
+        d.index = d.Date
+        d = d.drop(columns=['Date'])
+        # all a terrible fix/hack
+        d.fillna(0, inplace=True)
+        d.fitted.backfill(inplace=True)
+        d.fitted.ffill(inplace=True)
+        
+    
+    return d 
 
 def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31', 
           dist=20, stat='median', para=False, 
@@ -1134,8 +1183,7 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
     ----------
     
     geometry: list
-                either [lon,lat] for a point, or a set of coordinates for a 
-                polygon
+
 
     start_date: string
                     start date of time series
@@ -1153,17 +1201,12 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
             aggregate to... 'week', 'month'
               
     """
-    # possible to access via gpd & the usual shapely fare....
-    # geom = gdf['geometry'][0]
-    # geom.exterior.coords.xy
-    # but will lead to issues....
-    
     geom = poly2dictlist(inshp, wgs84=reproj)
     
     idx = np.arange(0, len(geom))
     
     gdf = gpd.read_file(inshp)
-    
+
     # silly gpd issue
     if 'key_0' in gdf.columns:
         gdf = gdf.drop(columns=['key_0'])
@@ -1348,14 +1391,11 @@ def _s2_tseries(geometry, start_date='2016-01-01',
     df = df.set_index(df['Date'])
     
     nd = df['fitted']  # change this in the harmonic code....
-    # due to the occasional bug being an object
-    # if bandlist == None:
-    # nd = pd.to_numeric(pd.Series(df['fitted']))
-    # elif bandlist != None:
-    #     #TODO why have done the above when it is simpler to do the below
-    #     bandlist.append('NDVI')
-    #     nd = df[bandlist]#.to_numpy()
-
+    
+    pdagg = agg[0].capitalize()
+    
+    nd = _fixgaps(nd, pdagg, stat, start_date, end_date)
+    
     return nd.transpose()
     
 
@@ -1441,41 +1481,41 @@ def S2_ts(inshp, reproj=False,
                     para=True,
                     agg=agg) for p in idx) 
     
-    if len(bandlist) > 1:
+    #if len(bandlist) > 1:
         
-        #TODO There must be a more elegant/efficient way
-        listarrs = [d.to_numpy().flatten() for d in datalist]
-        finaldf = pd.DataFrame(np.vstack(listarrs))
-        del listarrs
-        
-        colstmp = []
-        # this seems inefficient
-        # if agg == 'month':
-        #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-        # else:
-        times = datalist[0].columns.strftime("%y-%m-%d").tolist()
-        for b in bandlist:
-            tmp = [b+"-"+ t for t in times]
-            colstmp.append(tmp)
-        # apperently quickest
-        colsfin = list(chain.from_iterable(colstmp))
-
-        finaldf.columns = colsfin
-
-        
-    else:
+    #TODO There must be a more elegant/efficient way
+    listarrs = [d.to_numpy().flatten() for d in datalist]
+    finaldf = pd.DataFrame(np.vstack(listarrs))
+    del listarrs
     
-        finaldf = pd.DataFrame(datalist)
+    colstmp = []
+    # this seems inefficient
+    # if agg == 'month':
+    #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
+    # else:
+    times = datalist[0].index.strftime("%y-%m-%d").tolist()
+    for b in bandlist:
+        tmp = [b[0].lower()+"-"+ t for t in times]
+        colstmp.append(tmp)
+    # apperently quickest
+    colsfin = list(chain.from_iterable(colstmp))
+
+    finaldf.columns = colsfin
+
         
-        # Unfortunately monthly aggs do not always occur via GEE it seems
-        # can result in duplicate values eg 2 aprils then geopandas won't
-        # write the file
-        # if agg == 'month':
-        #     finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-        #     finaldf.columns = ["n-"+c for c in finaldf.columns]
-        #else:
-        finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
-        finaldf.columns = ["n-"+c for c in finaldf.columns]
+    #else:
+    
+        # finaldf = pd.DataFrame(datalist)
+        
+        # # Unfortunately monthly aggs do not always occur via GEE it seems
+        # # can result in duplicate values eg 2 aprils then geopandas won't
+        # # write the file
+        # # if agg == 'month':
+        # #     finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
+        # #     finaldf.columns = ["n-"+c for c in finaldf.columns]
+        # #else:
+        # finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
+        # finaldf.columns = ["n-"+c for c in finaldf.columns]
 
     # for some reason merge no longer working due to na error when there is none
     # hence concat. If they are in correct order no reason to worry as
