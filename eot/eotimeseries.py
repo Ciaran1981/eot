@@ -152,6 +152,10 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
     if isinstance(inshp, dict):
         # if it is just a geojson geom carry on
         geom = inshp 
+    # this need for zonal ts as we pass a bbox ee.geometry
+    elif isinstance(inshp, ee.geometry.Geometry):
+        geom = inshp
+        
     else:
         # we assume (probably shouldn't) it is a string
         # get the shp file ext to demarcate the collection
@@ -560,36 +564,36 @@ def extent2poly(infile, filetype='polygon', outfile=None, polytype="ESRI Shapefi
         tproj = lyr.GetSpatialRef()
     
     # in case we wish to write it for later....    
-    if outfile != None:
-        #outfile = infile[:-4]+'extent.shp'
+    # if outfile != None:
+    #     #outfile = infile[:-4]+'extent.shp'
         
-        out_drv = ogr.GetDriverByName(polytype)
+    #     out_drv = ogr.GetDriverByName(polytype)
         
-        # remove output shapefile if it already exists
-        if os.path.exists(outfile):
-            out_drv.DeleteDataSource(outfile)
+    #     # remove output shapefile if it already exists
+    #     if os.path.exists(outfile):
+    #         out_drv.DeleteDataSource(outfile)
         
-        # create the output shapefile
-        ootds = out_drv.CreateDataSource(outfile)
-        ootlyr = ootds.CreateLayer("extent", tproj, geom_type=ogr.wkbPolygon)
+    #     # create the output shapefile
+    #     ootds = out_drv.CreateDataSource(outfile)
+    #     ootlyr = ootds.CreateLayer("extent", tproj, geom_type=ogr.wkbPolygon)
         
-        # add an ID field
-        idField = ogr.FieldDefn("id", ogr.OFTInteger)
-        ootlyr.CreateField(idField)
+    #     # add an ID field
+    #     idField = ogr.FieldDefn("id", ogr.OFTInteger)
+    #     ootlyr.CreateField(idField)
         
-        # create the feature and set values
-        featureDefn = ootlyr.GetLayerDefn()
-        feature = ogr.Feature(featureDefn)
-        feature.SetGeometry(poly)
-        feature.SetField("id", 1)
-        ootlyr.CreateFeature(feature)
-        feature = None
+    #     # create the feature and set values
+    #     featureDefn = ootlyr.GetLayerDefn()
+    #     feature = ogr.Feature(featureDefn)
+    #     feature.SetGeometry(poly)
+    #     feature.SetField("id", 1)
+    #     ootlyr.CreateFeature(feature)
+    #     feature = None
         
-        # Save and close 
-        ootds.FlushCache()
-        ootds = None
+    #     # Save and close 
+    #     ootds.FlushCache()
+    #     ootds = None
     
-        geemap.shp_to_ee(outfile)
+    #     geemap.shp_to_ee(outet.plot_group(file)
     
     # flatten to 2d (done in place)
     poly.FlattenTo2D()
@@ -676,7 +680,7 @@ def s2collection_ts(start_date, end_date, roi, cloud_filter=60, band='NDVI',
     
     
 
-def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
+def zonal_tseries(inShp, start_date, end_date, bandnm='NDVI',
                   attribute='id', scale=20):
     
     
@@ -723,7 +727,7 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
         
     elif isinstance(inShp, gpd.geodataframe.GeoDataFrame):
         
-        shp = geemap.gdf_to_ee(inShp)
+        shp = geemap.gdf_to_ee(inShp) 
     
     elif isinstance(inShp, ee.featurecollection.FeatureCollection):
         
@@ -731,8 +735,32 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
     
     poly = shp.geometry().bounds()
     
-    collection = s2collection_ts(start_date, end_date, poly, cloud_filter=60, 
+    if bandnm == 'GEOS3':
+        
+        bs_masked, _, _ = baresoil_collection(poly, start_date=start_date, 
+                                              end_date=end_date, 
+                                              band_list=['fcover'])
+        
+        dep = 'fcover'
+        # doesn't work without this stage - must find out why....
+        bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
+        #No longer using pandas as no need
+        ts = wxee.TimeSeries(bsfinal).select(['GEOS3'])
+        
+        # this must be maximum to retain the baresoil binary values
+        # this does render the fcover pointless as you need the average of that
+        collection = ts.aggregate_time(frequency='month', reducer=ee.Reducer.max())
+        
+        sel = 'GEOS3'
+        # for later fixing
+        stat = 'max'
+        
+    else:
+        collection = s2collection_ts(start_date, end_date, poly, cloud_filter=60, 
                                  band=bandnm, agg='month')
+        sel = 'fitted'
+        # for later fixing
+        stat = 'median'
     
     # select the band and perform a spatial agg
     # GEE makes things ugly/hard to read
@@ -742,7 +770,7 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
         def wrapf(f):
             return f.set('imageId', image.id())
         
-        return (image.select('fitted')
+        return (image.select(sel)
         .reduceRegions(
           collection=shp.select([attribute]),
           reducer=ee.Reducer.mean(),
@@ -785,23 +813,32 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
     #             t          rowid       colid
     table = _fmt(triplets, attribute, 'imageId')
     
-    print('converting to pandas df')
+    print('downloading from gee')
     df = geemap.ee_to_pandas(table)
     
     # Now we need to sort the columns by date which are not in order
     df.sort_index(axis=1, inplace=True)
     
+    # right, at this point we need to fix the variable length and fill
+    # the gaps
+    
+    
     # format the date/veg ind columns
     names = [c.split(sep='_')[0][0:8] for c in df.columns]
     
-    names = names[:-1] # get rid of attribute
-    
-    bname = bandnm[0].lower()
-    fnames = [_dodate(n, bname) for n in names]
-    
-    fnames.append(attribute)
 
-    df.columns = fnames
+    names = names[:-1] # get rid of attribute - 
+    
+    bname = bandnm[0].lower()+'-'
+    
+    # have filled the gaps in the previous hacky manner
+    dnames = [_dodate2(n) for n in names]
+    dnames.append(attribute)
+    df.columns = dnames
+    
+    # stat is determined by input collection - if bs then max, otherwise median
+    dft =_fix_ts(df, start_date, end_date, attribute, bname, agg='M', stat=stat)
+    
     
     #TODO open gdf & merge, then return and/or write
     # do we merge it here or do this outside func to stop opening & closing
@@ -824,12 +861,47 @@ def zonal_tseries(inShp, start_date, end_date,  bandnm='NDVI',
     #TODO
     # while task.status()['state'] == 'RUNNING':
     #     print('')
+    
+    # OR
+    
+    # geemap.ee_export_vector_to_drive(
+    # fc, description="europe", fileFormat='SHP', folder="export")
 
-    return df
+
+    return dft
+
+def _fix_ts(df, start_date, end_date, attribute, bname, agg='M', stat='median'):
+    
+    # another dire hack to get the job done
+    
+    dft = df.transpose()
+    dft = dft.drop(dft[dft.index == 'idx'].index)
+    dft['Date'] = pd.to_datetime(dft.index)
+    dft = dft.set_index(dft['Date'])
+    
+    # TODO add the agg(M) and stat(median) params further up 
+    # as different depending on bs or ndvi
+    dft = _fixgaps(dft, agg, stat, start_date, end_date)
+    
+    dft = dft.transpose()
+    
+    dft.columns = dft.columns.strftime('%Y-%m-%d')
+    
+    dft.columns = [bname+c[2:] for c in dft.columns]
+    
+    dft[attribute] = df[attribute]
+    dft.index.rename('index', inplace=True)
+    
+    return dft
     
 def _dodate(n, bandname):
     # awful
     oot = bandname + n[2:4] +'-'+n[4:6]+'-'+n[6:8]
+    return oot
+
+def _dodate2(n):
+    #ditto 
+    oot = n[0:4] +'-'+n[4:6]+'-'+n[6:8]
     return oot
 
 def points_to_pixel(gdf, espgin='epsg:27700', espgout='epsg:4326'):
@@ -963,6 +1035,8 @@ def harmonic_regress(collection, dependent='NDVI', harmonics=3):
         lambda image : image.addBands(image.select(
             independents).multiply(harmonicTrendCoefficients).reduce('sum').rename('fitted')))
     
+    # so the sum of the 1st 3 harmonic terms is the output ts
+    
     return fittedHarmonic
     
 
@@ -977,9 +1051,8 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     Parameters
     ----------
     
-    geometry: list
-                either [lon,lat] fot a point, or a set of coordinates for a 
-                polygon
+    geometry: geodataframe
+                a geodataframe of a single geometry
 
     start_date: string
                     start date of time series
@@ -997,6 +1070,8 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # joblib hack - this is goona need to run in gee directly i think
     if para == True:
         ee.Initialize()
+        
+    #geometry = geemap.gdf_to_ee(geometry)
     
     # has to reside in here in order for para execution
     # TODO scale needs to be made and explcit param above 
@@ -1201,18 +1276,21 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
             aggregate to... 'week', 'month'
               
     """
+    # this seems to causing issues w/ cs polys
     geom = poly2dictlist(inshp, wgs84=reproj)
     
     idx = np.arange(0, len(geom))
     
     gdf = gpd.read_file(inshp)
-
+    
+    #idx = np.arange(0, gdf.shape[0])
+    
     # silly gpd issue
     if 'key_0' in gdf.columns:
         gdf = gdf.drop(columns=['key_0'])
     
     datalist = Parallel(n_jobs=nt, verbose=2)(delayed(_bs_tseries)(
-                    geom[p],
+                    geom[p],#gdf.iloc[[p]],
                     start_date=start_date,
                     end_date=end_date,
                     stat=stat,
@@ -1542,7 +1620,7 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     Parameters
     ----------
     
-    df: byte
+    df: byte                     
         input pandas/geopandas df
     
     group: string
@@ -1578,7 +1656,9 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     
     
     #TODO potentially drop this as could be donw outside func
+    #Not sure why I have stuck with this
     sqr = df.loc[df[group].isin(index)]
+    
     
     yrcols = [y for y in sqr.columns if name in y]
     
