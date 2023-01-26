@@ -878,7 +878,7 @@ def _fix_ts(df, start_date, end_date, attribute, bname, agg='M', stat='median'):
     dft = dft.drop(dft[dft.index == 'idx'].index)
     dft['Date'] = pd.to_datetime(dft.index)
     dft = dft.set_index(dft['Date'])
-    
+    dft.drop(columns='Date', inplace=True)
     # TODO add the agg(M) and stat(median) params further up 
     # as different depending on bs or ndvi
     dft = _fixgaps(dft, agg, stat, start_date, end_date)
