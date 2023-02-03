@@ -23,7 +23,6 @@ from itertools import chain
 import ee, eemont, wxee
 from eot.s2_masks import addCloudShadowMask, applyCloudShadowMask, addGEOS3Mask, loadImageCollection
 from eot.s2_fcover import fcover
-from eot.composites import*
 import math
 from shapely.geometry import box, mapping
 ee.Initialize()
@@ -108,7 +107,6 @@ def geos3(collection):
     def _funcbs(img):
         
         geos3 = addGEOS3Mask(img)
-        return img.addBands(geos3)
         # originally this updated the mask meaning only the bare pixels were returned for all bands
         # return img.updateMask(geos3)
         return img.addBands(geos3)
@@ -210,14 +208,6 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
     bs_collection = masked_collection.map(_funcbsnotmask)
     # ...and the one with a binary mask wherever there is bare soil.
     bs_masked = geos3(masked_collection)
-    
-    # Set base date to generate a Day of Year layer
-    
-    #from_date = ee.Date.parse('YYYY-MM-dd', year + '-01-01')
-
-    # # Generate the series to be used as input for the drawing tool plot.
-    # plot_series = drawingTools.preparePlotSeries(masked_collection, bs_collection, geom,
-    #                                                  from_date, date_range_temp, band_list)
 
     date_range = date_range_temp
 
@@ -229,17 +219,6 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
 
     # Generate a list of time intervals for which to generate a harmonized time series
     time_intervals = extractTimeRanges(date_range.get('start'), date_range.get('end'), 30)
-
-    #TODO - post translation the harmonic series is not working - 
-    # not critical but it'd be nice to ken 
-    # the naming problem occurs here!! All fine until this point
-    # Generate harmonized monthly time series of FCover as input to the vegetation factor V
-    #fcover_ts = harmonizedTS(masked_collection, band_list, time_intervals, band_name='fcover')#, {'agg_type': 'geomedian'})
-
-    # Run a harmonic regression on the time series to fill missing data gaps and smoothen the NDVI profile.
-    #fcover_ts_smooth = harmonicRegression(fcover_ts, 'fcover', 4)
-                                     # clamping to [0,10000] data range,
-                                     # as harmonic regression may shoot out of data range
 
     # Calculate the bare soil frequency,
     # i.e. the number of bare soil observations divided by the number of cloud-free observations
@@ -253,8 +232,6 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
     # Define a mask that categorizes pixels > 95% frequency as permanently bare,
     # i.e. rocky outcrops and other bare surfaces that have little to no restoration potential
     bs_freq_mask = bs_freq.gt(0).And(bs_freq.lt(0.95))
-
-    #area_chart =  charts.areaChart(bs_freq, 'bare_soil_frequency', geom, pie_options)
 
     bs_freq = bs_freq.updateMask(bs_freq_mask)
     
@@ -631,19 +608,7 @@ def s2collection_ts(start_date, end_date, roi, cloud_filter=60, band='NDVI',
     
     """
     
-    #if isinstance(roi, str):
-        
-    
-    # # unfinished TODO must incorporate this
-    # # else assume it is a ee geometry
-    # # elif isinstance(roi, ee.geometry.Geometry):
-    # elif isinstance(roi, geopandas.geodataframe.GeoDataFrame):
-    #     # shapely box
-    #     poly = box(*gdf.total_bounds)
-    #     poly = json.dumps(mapping(geom)) # not in correct format....
-        
-   # else:
-        #poly = roi
+
     poly = roi
     
     # this needs updated yearly - think of something better
@@ -742,7 +707,7 @@ def zonal_tseries(inShp, start_date, end_date, bandnm='NDVI',
                                               band_list=['fcover'])
         
         dep = 'fcover'
-        # doesn't work without this stage - must find out why....
+        # doesn't work without this 
         bsfinal = harmonic_regress(bs_masked, dependent=dep, harmonics=3)
         #No longer using pandas as no need
         ts = wxee.TimeSeries(bsfinal).select(['GEOS3'])
@@ -819,10 +784,6 @@ def zonal_tseries(inShp, start_date, end_date, bandnm='NDVI',
     # Now we need to sort the columns by date which are not in order
     df.sort_index(axis=1, inplace=True)
     
-    # right, at this point we need to fix the variable length and fill
-    # the gaps
-    
-    
     # format the date/veg ind columns
     names = [c.split(sep='_')[0][0:8] for c in df.columns]
     
@@ -836,6 +797,7 @@ def zonal_tseries(inShp, start_date, end_date, bandnm='NDVI',
     dnames.append(attribute)
     df.columns = dnames
     
+    # hack to fix as yet unexplained gaps in ts for certain polys/locations
     # stat is determined by input collection - if bs then max, otherwise median
     dft =_fix_ts(df, start_date, end_date, attribute, bname, agg='M', stat=stat)
     
@@ -1027,9 +989,11 @@ def harmonic_regress(collection, dependent='NDVI', harmonics=3):
     # used modis but now any given collection
     harmonicC = collection.map(addConstant).map(addTime).map(addHarmonics)
     
-    harmonicTrend = harmonicC.select(independents.add(dependent)).reduce(ee.Reducer.linearRegression(independents.length(), 1))
+    harmonicTrend = harmonicC.select(independents.add(
+        dependent)).reduce(ee.Reducer.linearRegression(independents.length(), 1))
     
-    harmonicTrendCoefficients = harmonicTrend.select('coefficients').arrayProject([0]).arrayFlatten([independents])
+    harmonicTrendCoefficients = harmonicTrend.select(
+        'coefficients').arrayProject([0]).arrayFlatten([independents])
     
     fittedHarmonic = harmonicC.map(
         lambda image : image.addBands(image.select(
@@ -1172,12 +1136,6 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
 
     # should be this but....
     bs = df[bandList]    
-    #TODO fix issue in merge in main func to do with shape
-    # finaldf = pd.DataFrame(datalist)
-    # when creating the final df it complains about the shape being (n,n,n)
-    # so having to export a series - have tried list of series and didn't work
-    #bs = pd.Series(df['GEOS3'])
-    #fcover = pd.Series(df['fitted'])
     
     # As we used the spatial mean earlier the bare soil needs rounded up 
     # to be binary again
@@ -1197,19 +1155,17 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     # create an even ts as sometimes all wks/mnths do not appear in localities
     # Always take the temporal max. To get the spatial proportion of a field
     # take the spatial average of the binary values
-    bs = _fixgaps(bs, pdagg, 'max', start_date, end_date)
+    bs = _fixgaps(bs, pdagg, 'max', start_date, end_date, 'GEOS3')
     
     
     return bs.transpose()
 
 
-def _fixgaps(d, agg, stat, start_date, end_date):
+def _fixgaps(d, agg, stat, start_date, end_date):#, bname):
     
     # Issue is with S2, where there don't appear to be imgs for certain locations
     # at certain times
     # TODO this is still problemtatic - don't ken why it occurs
-    # fixes gaps within but not at the beggining of ts. 
-    # it may be the 
     
     
     # ts from GEE often end up with months missing and 2 dates in one month 
@@ -1234,14 +1190,14 @@ def _fixgaps(d, agg, stat, start_date, end_date):
     chk_rng = pd.DataFrame(pd.date_range(start_date, end_date, freq='M'),
                            columns=['Date'])
     if chk_rng['Date'].size > d.index.size:
-        
+        # for gaps at the start/end
         d = chk_rng.merge(d, how='left', left_on='Date', right_on=d.index)
         d.index = d.Date
         d = d.drop(columns=['Date'])
         # all a terrible fix/hack
         d.fillna(0, inplace=True)
-        d.fitted.backfill(inplace=True)
-        d.fitted.ffill(inplace=True)
+        d.backfill(inplace=True)
+        d.ffill(inplace=True)
         
     
     return d 
@@ -1313,10 +1269,7 @@ def bs_ts(inshp, reproj=False, start_date='2021-01-01', end_date='2021-12-31',
     bandlist = ['g', 'f']
     # this seems inefficient, but gets the job done as simply chucking the list
     # of dfs as pd.Dataframe does not work
-    # if agg == 'month':
-    #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-    # else:
-    # in line w/ s2_ts
+
     times = datalist[0].columns.strftime("%y-%m-%d").tolist()
     for b in bandlist:
         tmp = [b+"-"+ t for t in times]
@@ -1408,10 +1361,6 @@ def _s2_tseries(geometry, start_date='2016-01-01',
     S2 = (ee.ImageCollection(S2cld)
         .spectralIndices(['NDVI']))
     
-    # how does one map over a list in GEE
-    # def hrfunc(collection, band):
-    #     harmonic_regress(S2, dependent=band, harmonics=3)
-    
     
     S2final = harmonic_regress(S2, dependent='NDVI', harmonics=3) 
     
@@ -1472,12 +1421,10 @@ def _s2_tseries(geometry, start_date='2016-01-01',
     
     pdagg = agg[0].capitalize()
     
-    nd = _fixgaps(nd, pdagg, stat, start_date, end_date)
+    nd = _fixgaps(nd, pdagg, stat, start_date, end_date)#, bname)
     
     return nd.transpose()
     
-
-# A quick/dirty answer but not an efficient one - this took almost 2mins....
 
 def S2_ts(inshp, reproj=False,
           start_date='2016-01-01', end_date='2016-12-31', dist=20, 
@@ -1674,16 +1621,7 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
         # set the dtrange......
         # this code is dire  due to way i wrote other stuff from gee plus
         # ad hoc changes as I go
-        #TODO alter this crap
-        # if freq == 'M':
-        #     startd = yrcols[0][-5:]
-        #     startd = '20'+startd+'-01'
-        #     # this seems stupid
-        #     endd = yrcols[-1:][0][-5:]
-        #     endd = '20'+endd[0:2]+'-12-31'
-        #     dtrange = pd.date_range(start=startd, end=endd, freq=freq)
-            
-        #else:
+
         startd = yrcols[0][-8:]
         startd = '20'+startd
         endd = yrcols[-1:][0][-8:]
@@ -1706,10 +1644,7 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     
     
     new = new.set_index('Date')
-    # what is this doing....
-    #new.columns=[name]
-    # to add the index as the legend
-    #new['mean'] = new.mean()
+
     if plotstat == 'mean':
         mn = new.mean(axis=1)
     elif plotstat == 'median':
@@ -1803,16 +1738,7 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
         # set the dtrange......
         # this code is dire  due to way i wrote other stuff from gee plus
         # ad hoc changes as I go
-        #TODO alter this crap
-        # if freq == 'M':
-        #     startd = yrcols[0][-5:]
-        #     startd = '20'+startd+'-01'
-        #     # this seems stupid
-        #     endd = yrcols[-1:][0][-5:]
-        #     endd = '20'+endd[0:2]+'-12-31'
-        #     dtrange = pd.date_range(start=startd, end=endd, freq=freq)
-            
-        #else:
+
         startd = yrcols[0][-8:]
         startd = '20'+startd
         endd = yrcols[-1:][0][-8:]
@@ -2013,14 +1939,7 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
 
             
     # TODO - this is crap really needs replaced....
-    # ndplotvals = sqr[yrcols]
-    # soilplotvals = sqr[soilcols]
-    
-    # slnew = soilplotvals.transpose()
-    # new = ndplotvals.transpose()
-    
-        
-    #if freq != 'M':
+
     new = _doit(new, "f-")
     slnew = _doit(slnew, "g-")
         
@@ -2033,16 +1952,7 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     slbare = slnew[slnew.values>0]
     
     soildates = slbare.index
-    
-    #new.columns=[name, name]
-    
-    # it is not scaled to put lines between months....
-    # but the line doesn't plot so sod this
-#    days = pd.date_range(start='20'+year+'-01-01',
-#                                end='20'+year+'-12-31',
-#                                freq='D')
-#    
-#    new = new.reindex(days)
+
 #   and before you try it - dropna just returns the axis to monthly.
     
 #    # to add the index as the legend
@@ -2053,14 +1963,6 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
          maxr = new.max(axis=1, numeric_only=True)
          ax.fill_between(new.index, minr, maxr, alpha=0.1, label='min')
     
-    #if year is None:
-        # TODO this could be adapted to highlight the phenostages with their
-        # labels
-    # this is not doing anything useful for soil plot
-    # xpos = [pd.to_datetime(startd), pd.to_datetime(endd)]
-    # for xc in xpos:
-    #     ax.axvline(x=xc, color='k', linestyle='--', label='pish')
-    # ax.axvspan(xpos[0], xpos[1], facecolor='gray', alpha=0.2)
 
     ax.legend(labels=df[group].to_list(), loc='center left', 
               bbox_to_anchor=(1.0, 0.5))
@@ -2073,81 +1975,13 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     
     for p in soildates:
          plt.axvline(p, color='k', linestyle='--')
-    # The crop dicts -approx patterns of crop growth....
-    # this is a hacky mess for now
-    # Problem is axis is monthly from previous
-    # so changing to days or weeks doesn't work, including half months
-    # crop_dict = {"SP BA": [pd.to_datetime(yr+"-04-01"), pd.to_datetime(yr+"-05-01"),
-    #                        pd.to_datetime(yr+"-06-01"), pd.to_datetime(yr+"-08-01"),
-    #                        pd.to_datetime(yr+"-09-01")]}
-    
-    
-    # crop_dict = {"SP BA": [pd.to_datetime(yr+"-04-01"), pd.to_datetime(yr+"-05-01"),
-    #                        pd.to_datetime(yr+"-06-01"), pd.to_datetime(yr+"-08-01"),
-    #                        pd.to_datetime(yr+"-09-01")],
-    #              "SP BE": [],
-    #              "SP Oats": [],
-    #              "SP WH": [pd.to_datetime(yr+"-04-01"), pd.to_datetime(yr+"-05-01"),
-    #                        pd.to_datetime(yr+"-06-01"), pd.to_datetime(yr+"-08-01"),
-    #                        pd.to_datetime(yr+"-09-01")],
-    #              "W Rye": [],
-    #              "W Spelt": [],
-    #              "W WH": []}
-    
-    # these are placeholders and NOT correct!!!
-    # mind the list much be same length otherwise zip will stop at end of shortest
-    # also the last entry is of course not between lines
-    # crop_seq = {"SP BA": [' Em', ' Stem' ,' Infl',
-    #                        ' Flr>\n Gr>\n Sen',
-    #                        ""],
-    #              "SP BE": [],
-    #              "SP Oats": [],
-    #              "SP WH": [' Em', ' Stem' ,' Infl',
-    #                        ' Flr>\n Gr> \nSen',
-    #                        ""],
-    #              "W Rye": [],
-    #              "W Spelt": [],
-    #              "W WH": []}
-    
-    # # rainbow
-    #clrs = cm.rainbow(np.linspace(0, 1, len(crop_dict[crop])))
-    
-    # #for the text 
-    # style = dict(size=10, color='black')
-    
-    
-    #useful stuff here
-    #https://jakevdp.github.io/PythonDataScienceHandbook/04.09-text-and-annotation.html
+
     
     # this is also a mess
     # Gen the min of mins for the position of text on y axis
     minr = new.min(axis=1, numeric_only=True)
     btm = minr.min() - (minr.min() / 2)
-    # for xc, nm in zip(crop_dict[crop], crop_seq[crop]):
-    #     ax.axvline(x=xc, color='k', linestyle='--')
-    #     ax.text(xc, minr.min(), " "+nm, ha='left', **style)
-        # can't get this to work as yet
-#        ax.annotate(nm, xy=(xc, 0.1),
-#                    xycoords='data', bbox=dict(boxstyle="round", fc="none", ec="gray"),
-#                    xytext=(10, -40), textcoords='offset points', ha='center',
-#                    arrowprops=dict(arrowstyle="->"), 
-#                    annotation_clip=False)
-   # theend = len(crop_dict[crop])-1
-    
-    # for idx, c in enumerate(clrs):
-    #     if idx == len(clrs)-1:
-    #         break
-    #     ax.axvspan(crop_dict[crop][idx], crop_dict[crop][idx+1], 
-    #                 facecolor=c, alpha=0.1)
-        
-    
-    
-    # so if we take the mid date point we can put the label in the middle
- 
-    # hmm this does not do what I had hoped, it's not in the middle....
-    # midtime = xpos[0] + (xpos[1] - xpos[0])/2
-    # can cheat by putting a space at the start!!!!
-    #ax.text(midtime, 0.5, " crop", ha='left', **style)
+
     plt.show()
 
     
@@ -2440,7 +2274,7 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
         # otherwise this screws up searches for only VH etc
         polar = 'S1R'
     
-    # if agg != 'M':
+
     #TODO A mess to be replaced
     if polar == 'VV':
         polar = 'V'
@@ -2449,9 +2283,7 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
     elif polar == 'S1R':
         polar = 'R'
     finaldf.columns = [polar+'-'+c for c in finaldf.columns]
-    # else:
 
-    #     finaldf.columns = [polar+'-'+c for c in finaldf.columns]
         
     #newdf = pd.merge(gdf, finaldf, on=gdf.index)
     finaldf.index = gdf.index 
@@ -2467,6 +2299,7 @@ def S2ts_eemont(inshp, start_date='2020-01-01', end_date='2021-01-01',
                 col='COPERNICUS/S2_SR',  
                 bands=['NDVI'], id_field='NGFIELD', agg='M'):
     
+    # Toos slow & limited by data
     # limited by no of polygons / imcollection
     # error occurs in conversion to pandas....
     # either of the above can cause it eg either too many in the imcollection
@@ -2522,12 +2355,6 @@ def S2ts_eemont(inshp, start_date='2020-01-01', end_date='2021-01-01',
     
     return newdf
     
-    # if a monthly agg
-    #yip.columns = yip.columns.strftime("%y-%m").to_list() 
-    #yip.columns = ["nd-"+c for c in yip.columns]
-    
-    
-
     
 
 def gdf2ee(gdf):
@@ -2595,89 +2422,47 @@ def tseries_group(df, name, other_inds=None):
 
 
 
-# a notable alternative
-#import ee
-#ee.Initialize()
-#
-
-#using fcoll above
+def extractTimeRanges(start, end, agg_interval):
     
-#points = list(zip(lons, lats))
-#
-#fcoll = _point2geefeat(points)
-#
-#collection = ee.ImageCollection(
-#    'MODIS/006/MOD13Q1').filterDate('2017-01-01', '2017-05-01')
-#
-#def setProperty(image):
-#    dict = image.reduceRegion(ee.Reducer.mean(), fcoll)
-#    return image.set(dict)
-#
-#withMean = collection.map(setProperty)
-#
-#yip = withMean.aggregate_array('NDVI').getInfo()
+    #Extract the time range data from the received time range and aggregation interval e.g.,
+    # 'input time interval': time_interval = ['2019-01-01', '2020-01-01'], 'agg_interval': 60 days
+    # 'generate the following time intervals':
+    # time_range = [("2019-01-01T00:'00':00Z", "2019-03-01T00:'00':00Z"),
+    #             ("2019-03-01T00:'00':00Z", "2019-05-01T00:'00':00Z"),
+    #             ("2019-05-01T00:'00':00Z", "2019-07-01T00:'00':00Z"),
+    #             ("2019-07-01T00:'00':00Z", "2019-09-01T00:'00':00Z"),
+    #             ("2019-09-01T00:'00':00Z", "2019-11-01T00:'00':00Z"),
+    #             ("2019-11-01T00:'00':00Z", "2020-01-01T00:'00':00Z")
+    #
 
-#def zonal_tseries(inShp, collection, start_date, end_date, outfile,  
-#                  bandnm='NDVI', attribute='id'):
-#    
-#    """
-#    Zonal Time series for a feature collection 
-#    
-#    Parameters
-#    ----------
-#    
-#    inShp: string
-#                a shapefile in the WGS84 lat/lon proj
-#              
-#    collection: string
-#                    the image collection  best if this is agg'd monthly or 
-#                    something
-#    
-#    start_date: string
-#                    start date of time series
-#    
-#    end_date: string
-#                    end date of time series
-#             
-#    bandnm: string
-#             the bandname of choice that exists or has been created in 
-#             the image collection  e.g. B1 or NDVI
-#            
-#    attribute: string
-#                the attribute for filtering (required for GEE)
-#                
-#    Returns
-#    -------
-#    
-#    shapefile (saved) and pandas dataframe
-#    
-#    Notes
-#    -----
-#    
-#    Unlike the other tseries functions here, this operates server side, meaning
-#    the bottleneck is in the download/conversion to shapefile/geojson
-#    """
-#    
-#    
-#    shp = geemap.shp_to_ee(inShp)
-#    
-#    # name the img
-#    def rename_band(img):
-#        return img.select([0], [img.id()])
-#    
-#    
-#    stacked_image = collection.map(rename_band).toBands()
-#    
-#    # get the img scale
-#    scale = collection.first().projection().nominalScale()
-#    
-#    # the finished feat collection
-#    ts = ee.Image(stacked_image).reduceRegions(collection=shp,
-#                 reducer=ee.Reducer.mean(), scale=scale)
-#    
-#    geemap.ee_export_vector(ts, outfile)
-#    
-#    # TODO return a dataframe?
-#    gdf = gpd.read_file(outfile)
-#    
-#    return gdf 
+    start_date = ee.Date(start)
+    end_date = ee.Date(end)
+
+    # Number of intervals in the given "time_range" based on the specified "agg_interval" period
+    interval_no = ee.Date(end).difference(ee.Date(start), 'day').divide(agg_interval).round()
+    month_check = ee.Number(30.4375 / agg_interval).round(); # The number of aggregation intervals within a month
+
+    # Compute the relative date delta (in months) to add to each preceding period to compute the new one
+    rel_delta = ee.Number(end_date.difference(start_date, 'day')) \
+                    .divide(ee.Number(30.4375).multiply(interval_no)).ceil(); 
+
+    # Compute the first time interval end date by adding the relative date delta (in months) to the start date
+    end_date = start_date.advance(start_date.advance(rel_delta, 'month') \
+                                  .difference(start_date, 'day') \
+                                  .divide(month_check), 'day') \
+                                  .advance(-1, 'second')
+
+    time_intervals = ee.List([ee.List([start_date, end_date])])
+    
+    # replaces below jscript original
+    def _functr(x, previous):
+        start_date = ee.Date(ee.List(ee.List(previous).reverse().get(0)).get(1)).advance(1, 'second')
+        end_date = start_date.advance(start_date.advance(rel_delta, 'month').difference(start_date, 'day').divide(month_check), 'day').advance(-1, 'second')
+        return ee.List(previous).add(ee.List([start_date, end_date]))
+    
+    #TODO was formerly a mess of nested jscript funcs - may not work see below
+    # eg where are x and previous??
+    time_intervals = ee.List(ee.List.sequence(1, interval_no.subtract(1)).iterate(_functr,
+                                                                                  time_intervals))
+
+    return time_intervals

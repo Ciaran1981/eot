@@ -275,7 +275,7 @@ def met_time_series_to_sheet(inRas, inShp,  prop, espgout=None):
     # the rgt
     # must remember to index the layer the gdal way,
     # so the first band would be [0,:,:]
-    #rgt, img = _get_nc(inRas, lyr=prop)
+    rgt, img = _get_nc(inRas, lyr=prop)
     # this will yield more intuitive dims but makes no dif 
     #img = img.transpose((1,2,0))
     
@@ -289,7 +289,7 @@ def met_time_series_to_sheet(inRas, inShp,  prop, espgout=None):
     times = _get_times(inRas)
     
     # cut the year so we can give a name
-    cols = list(times.index.strftime("%y-%m"))
+    cols = list(times.index.strftime("%Y-%m"))
     
     # quickest w/gdal/np inds [bnds,y,x]
     ndvals = img[:, py, px]
