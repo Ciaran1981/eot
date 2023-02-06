@@ -76,7 +76,7 @@ def _get_rgt(inras):
     
     
 
-def _get_nc(inRas, lyr=None, im=True):
+def _get_nc(inRas, lyr=None, im=True, modis=False):
     """
     get the geotransform of netcdf
     
@@ -88,10 +88,12 @@ def _get_nc(inRas, lyr=None, im=True):
 
     """
     # As netcdfs are 'special, need to specify the layer to get a rgt
-    # rds = gdal.Open("NETCDF:{0}:{1}".format(inRas, lyr)) - this seems to apply
-    # to MODIS but not the MET stuff
+    if modis == True:
+        rds = gdal.Open("NETCDF:{0}:{1}".format(inRas, lyr)) #- this seems to apply
+        # to MODIS but not the MET stuff
+    else:
     
-    rds = gdal.Open(inRas)
+        rds = gdal.Open(inRas)
 
     
     rgt = rds.GetGeoTransform()
@@ -158,7 +160,7 @@ def _get_times(inRas):
     
 # Main function
 
-def met_time_series(inRas, inShp, outfile, prop, espgout=None):
+def met_time_series(inRas, inShp, outfile, prop, espgout=None, modis=False):
     
     """ 
     Write met time series from a netcdf file to a point file
@@ -198,7 +200,7 @@ def met_time_series(inRas, inShp, outfile, prop, espgout=None):
         gdf = gdf.drop(columns=['key_0'])
         
     # the rgt and img array
-    rgt, img = _get_nc(inRas, lyr=prop)
+    rgt, img = _get_nc(inRas, lyr=prop, modis=modis)
     
     # the rgt is enough with met data 
     px, py, lons, lats = _points_to_pixel(gdf, rgt, 
