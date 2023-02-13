@@ -218,7 +218,7 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
     #v_collection = v_collection.filterDate(date_range.get('start'), date_range.get('end'))
 
     # Generate a list of time intervals for which to generate a harmonized time series
-    time_intervals = extractTimeRanges(date_range.get('start'), date_range.get('end'), 30)
+    time_intervals = _extractTimeRanges(date_range.get('start'), date_range.get('end'), 30)
 
     # Calculate the bare soil frequency,
     # i.e. the number of bare soil observations divided by the number of cloud-free observations
@@ -270,20 +270,8 @@ def s2cloudless(collection, start_date, end_date, geom,
     S2 collection with s2 cloudless and fractional cover included
     
     """
-    # cheers google/soilwatch
-    # # Global Cloud Masking parameters
-    # cld_prb_thresh = 40#; # Cloud probability threshold to mask clouds. 40% is the default value of s2cloudless
-    # cloud_filter = 60#; # Threshold on sentinel-2 Metadata field determining whether cloud pixel percentage in image
-    # nir_drk_thresh = 0.15#; # A threshold that determines when to consider a dark area a cloud shadow or not
-    # cld_prj_dist = 10#; # The distance (in no of pixels) in which to search from detected cloud to find cloud shadows
-    # buffer = 50#; # The cloud buffer (in meters) to use around detected cloud pixels to mask additionally
-    # mask_res = 60#; # resolution at which to generate and apply the cloud/shadow mask. 60m instead of 10m to speed up
     not_water = ee.Image("JRC/GSW1_2/GlobalSurfaceWater").select('max_extent').eq(0)
     
-    # s2 = ee.ImageCollection(collection) \
-    # .filterDate(start_date, end_date) \
-    # .filterBounds(geom) \
-    # .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_filter)
     s2 = collection.filterMetadata('CLOUDY_PIXEL_PERCENTAGE',
                                    'less_than', cloud_filter)
 
@@ -953,7 +941,7 @@ def harmonic_regress(collection, dependent='NDVI', harmonics=3):
                harmonic components
     """
     
-    # Credit to Joao Otavio Nascimento Firigato for this implementation
+    # Credit to Joao Otavio Nascimento Firigato for the basis of implementation
     # I merely made it a function for any collection
     
     
@@ -1139,9 +1127,6 @@ def _bs_tseries(geometry,  start_date='2021-01-01', end_date='2021-12-31', dist=
     
     # As we used the spatial mean earlier the bare soil needs rounded up 
     # to be binary again
-    # stop the stupid warning
-      # default='warn'
-    # this seems to b
 
     bs['GEOS3'].fillna(0, inplace=True)
     
@@ -1166,7 +1151,6 @@ def _fixgaps(d, agg, stat, start_date, end_date):#, bname):
     # Issue is with S2, where there don't appear to be imgs for certain locations
     # at certain times
     # TODO this is still problemtatic - don't ken why it occurs
-    
     
     # ts from GEE often end up with months missing and 2 dates in one month 
     # instead. Hence this to sort it out
@@ -1322,21 +1306,17 @@ def _s2_tseries(geometry, start_date='2016-01-01',
             aggregate to... 'week', 'month'
               
     """
-    # joblib hack - this is gonna need to run in gee directly i think
+    # joblib hack 
     if para == True:
         ee.Initialize()
     
     # has to reside in here in order for para execution
     def _reduce_region(image):
-        # cheers geeextract!   
         """Spatial aggregation function for a single image and a polygon feature"""
         stat_dict = image.reduceRegion(fun, geometry, 30);
         # FEature needs to be rebuilt because the backend doesn't accept to map
         # functions that return dictionaries
         return ee.Feature(None, stat_dict)
-    
-    #TODO this results in the loss of NDVI.....
-    #eemont may juts slow things down - may just add NDVI in masks module
     
     years = ee.Dictionary({'2016': 'COPERNICUS/S2',
                                '2017': 'COPERNICUS/S2',
@@ -1506,18 +1486,14 @@ def S2_ts(inshp, reproj=False,
                     para=True,
                     agg=agg) for p in idx) 
     
-    #if len(bandlist) > 1:
-        
+
     #TODO There must be a more elegant/efficient way
     listarrs = [d.to_numpy().flatten() for d in datalist]
     finaldf = pd.DataFrame(np.vstack(listarrs))
     del listarrs
     
     colstmp = []
-    # this seems inefficient
-    # if agg == 'month':
-    #     times = datalist[0].columns.strftime("%y-%m").tolist() #* (len(bandlist)+1)
-    # else:
+
     times = datalist[0].index.strftime("%y-%m-%d").tolist()
     for b in bandlist:
         tmp = [b[0].lower()+"-"+ t for t in times]
@@ -1526,26 +1502,6 @@ def S2_ts(inshp, reproj=False,
     colsfin = list(chain.from_iterable(colstmp))
 
     finaldf.columns = colsfin
-
-        
-    #else:
-    
-        # finaldf = pd.DataFrame(datalist)
-        
-        # # Unfortunately monthly aggs do not always occur via GEE it seems
-        # # can result in duplicate values eg 2 aprils then geopandas won't
-        # # write the file
-        # # if agg == 'month':
-        # #     finaldf.columns = finaldf.columns.strftime("%y-%m").to_list()
-        # #     finaldf.columns = ["n-"+c for c in finaldf.columns]
-        # #else:
-        # finaldf.columns = finaldf.columns.strftime("%y-%m-%d").to_list()
-        # finaldf.columns = ["n-"+c for c in finaldf.columns]
-
-    # for some reason merge no longer working due to na error when there is none
-    # hence concat. If they are in correct order no reason to worry as
-    # no index is present in the ndvi df anyway. 
-    #newdf = pd.merge(gdf, finaldf, on=gdf.index)
     
     # idx must be unique so make it the gdf one
     finaldf.index = gdf.index 
@@ -1601,7 +1557,6 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     
     # Quick dirty time series plotting
     
-    
     #TODO potentially drop this as could be donw outside func
     #Not sure why I have stuck with this
     sqr = df.loc[df[group].isin(index)]
@@ -1626,7 +1581,6 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
         startd = '20'+startd
         endd = yrcols[-1:][0][-8:]
         endd = '20'+endd
-        #dtrange = pd.date_range(start=startd, end=endd, freq=freq)
 
             
     # TODO - this is crap really needs replaced....
@@ -1634,15 +1588,11 @@ def plot_group(df, group, index, name,  year=None, title=None, fill=False,
     
     new = ndplotvals.transpose()
     
-    #if freq != 'M':
     new['Date'] = new.index
     new['Date'] = new['Date'].str.replace(name,'20')
     new['Date'] = new['Date'].str.replace('_','0')
     new['Date'] = pd.to_datetime(new['Date'])
-    #else:
-    #new['Date'] = dtrange
-    
-    
+
     new = new.set_index('Date')
 
     if plotstat == 'mean':
@@ -1743,7 +1693,6 @@ def plot_crop(df, group, index, name, crop="SP BA", year=None, title=None,
         startd = '20'+startd
         endd = yrcols[-1:][0][-8:]
         endd = '20'+endd
-        #dtrange = pd.date_range(start=startd, end=endd, freq=freq)
 
             
     # TODO - this is crap really needs replaced....
@@ -1953,9 +1902,9 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     
     soildates = slbare.index
 
-#   and before you try it - dropna just returns the axis to monthly.
+    #and before you try it - dropna just returns the axis to monthly.
     
-#    # to add the index as the legend
+    # to add the index as the legend
     ax = new.plot.line(title=title)
 
     if fill == True:
@@ -2422,7 +2371,23 @@ def tseries_group(df, name, other_inds=None):
 
 
 
-def extractTimeRanges(start, end, agg_interval):
+def _extractTimeRanges(start, end, agg_interval):
+    """
+    Extract the time range data from the received time range and aggregation interval
+
+    Parameters
+    ----------
+    
+    start: string
+           start date e.g. "2019-01-01" (YYY-MM-DD")
+
+    end: string
+           end date e.g. "2019-12-31" (YYY-MM-DD")    
+
+    agg_interval: int
+            e.g. 30          
+
+    """
     
     #Extract the time range data from the received time range and aggregation interval e.g.,
     # 'input time interval': time_interval = ['2019-01-01', '2020-01-01'], 'agg_interval': 60 days
@@ -2433,7 +2398,7 @@ def extractTimeRanges(start, end, agg_interval):
     #             ("2019-07-01T00:'00':00Z", "2019-09-01T00:'00':00Z"),
     #             ("2019-09-01T00:'00':00Z", "2019-11-01T00:'00':00Z"),
     #             ("2019-11-01T00:'00':00Z", "2020-01-01T00:'00':00Z")
-    #
+
 
     start_date = ee.Date(start)
     end_date = ee.Date(end)
@@ -2454,14 +2419,12 @@ def extractTimeRanges(start, end, agg_interval):
 
     time_intervals = ee.List([ee.List([start_date, end_date])])
     
-    # replaces below jscript original
     def _functr(x, previous):
         start_date = ee.Date(ee.List(ee.List(previous).reverse().get(0)).get(1)).advance(1, 'second')
         end_date = start_date.advance(start_date.advance(rel_delta, 'month').difference(start_date, 'day').divide(month_check), 'day').advance(-1, 'second')
         return ee.List(previous).add(ee.List([start_date, end_date]))
     
-    #TODO was formerly a mess of nested jscript funcs - may not work see below
-    # eg where are x and previous??
+
     time_intervals = ee.List(ee.List.sequence(1, interval_no.subtract(1)).iterate(_functr,
                                                                                   time_intervals))
 

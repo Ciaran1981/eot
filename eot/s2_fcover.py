@@ -2,14 +2,10 @@ import ee
 import math
 
 """
-# Taken from soilwatch javascript - credit to them. Rewritten with python api by Ciaran Robb
-# ****************************************************************************************************************** #
-# *************************** Module computing Fraction of Green Vegetation Cover (FCover) ************************* #
-# ****************************************************************************************************************** #
-
-# FCover calculation adapted from the sentinelhub custom-scripts repository:
-# https:#github.com/sentinel-hub/custom-scripts/tree/a8cfd9bb1e5c9fb94aa467ea94701a2f50c0e63e/sentinel-2/fcover
-# Special mention to Kristof van Tricht (@kristovt) for contributing the script.
+Adapted from soilwatch javascript/sentinelhub script - credit to wouellette. Rewritten with python api by Ciaran Robb
+FCover calculation adapted from the sentinelhub custom-scripts repository:
+https:#github.com/sentinel-hub/custom-scripts/tree/a8cfd9bb1e5c9fb94aa467ea94701a2f50c0e63e/sentinel-2/fcover
+Credit to Kristof van Tricht (@kristovt) for contributing the original script.
 """
 def fcover(sr_band_scale=1):
 
