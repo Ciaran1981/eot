@@ -228,3 +228,92 @@ def replace_str(template, t):
     out1 = template.replace('hp', t[0:2])
     out2 = out1.replace('40', t[2:4])
     return out2
+
+def clip_raster(inRas, inShp, outRas, cutline=True):
+
+    """
+    Clip a raster
+    
+    Parameters
+    ----------
+        
+    inRas: string
+            the input image 
+            
+    outPoly: string
+              the input polygon file path 
+        
+    outRas: string (optional)
+             the clipped raster
+             
+    cutline: bool (optional)
+             retain raster values only inside the polygon       
+            
+   
+    """
+    
+
+    vds = ogr.Open(inShp)
+           
+    rds = gdal.Open(inRas, gdal.GA_ReadOnly)
+    
+    lyr = vds.GetLayer()
+
+    
+    extent = lyr.GetExtent()
+    
+    extent = [extent[0], extent[2], extent[1], extent[3]]
+            
+
+    print('cropping')
+    ootds = gdal.Warp(outRas,
+              rds,
+              format = 'GTiff', outputBounds = extent)
+              
+        
+    ootds.FlushCache()
+    ootds = None
+    rds = None
+    
+    if cutline == True:
+        
+        rds1 = gdal.Open(outRas, gdal.GA_Update)
+        rasterize(inShp, outRas, outRas[:-4]+'mask.tif', field=None,
+                  fmt="Gtiff")
+        
+        mskds = gdal.Open(outRas[:-4]+'mask.tif')
+        
+        mskbnd = mskds.GetRasterBand(1)
+
+        cols = mskds.RasterXSize
+        rows = mskds.RasterYSize
+
+        blocksizeX = 256
+        blocksizeY = 256
+        
+        bands = rds1.RasterCount
+        
+        mskbnd = mskds.GetRasterBand(1)
+        
+        for i in tqdm(range(0, rows, blocksizeY)):
+                if i + blocksizeY < rows:
+                    numRows = blocksizeY
+                else:
+                    numRows = rows -i
+            
+                for j in range(0, cols, blocksizeX):
+                    if j + blocksizeX < cols:
+                        numCols = blocksizeX
+                    else:
+                        numCols = cols - j
+                    for band in range(1, bands+1):
+                        
+                        bnd = rds1.GetRasterBand(band)
+                        array = bnd.ReadAsArray(j, i, numCols, numRows)
+                        mask = mskbnd.ReadAsArray(j, i, numCols, numRows)
+                        
+                        array[mask!=1]=0
+                        bnd.WriteArray(array, j, i)
+                        
+        rds1.FlushCache()
+        rds1 = None

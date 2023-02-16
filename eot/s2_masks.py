@@ -132,7 +132,8 @@ def _addShadowBands(img, water_valmask, sr_band_scale):
 
 
 # GEOS3 algorithm implementation from: Demattê, José AM, et al.
-# "Bare earth’s Surface Spectra as a proxy for Soil Resource Monitoring." Scientific reports 10.1 (2020): 1-11.
+# "Bare earth’s Surface Spectra as a proxy for Soil Resource Monitoring." 
+# Scientific reports 10.1 (2020): 1-11.
 # Applied to Sentinel-2 data.
 def addGEOS3Mask(img):
     
@@ -142,7 +143,7 @@ def addGEOS3Mask(img):
   # Visible-toshortwave-infrared tendency index
   vnsir = ee.Image(1) \
               .subtract(ee.Image(2).multiply(img_rs.select('B4')) \
-                                             .subtract(img_rs.select('B3')).subtract(img_rs.select('B2')) \
+              .subtract(img_rs.select('B3')).subtract(img_rs.select('B2')) \
               .add(ee.Image(3).multiply(img_rs.select('B12').subtract(img_rs.select('B8')))))
 
   # GEOS3 equation

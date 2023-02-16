@@ -166,7 +166,8 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
                                '2018': 'COPERNICUS/S2',
                                '2019': 'COPERNICUS/S2_SR',
                                '2020': 'COPERNICUS/S2_SR',
-                               '2021': 'COPERNICUS/S2_SR'})
+                               '2021': 'COPERNICUS/S2_SR',
+                               '2022': 'COPERNICUS/S2_SR'})
 
     # date range dict
     dts = {'start': start_date, 'end': end_date}
@@ -211,7 +212,8 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
 
     date_range = date_range_temp
 
-    # Apply the actual date range specified, as opposed to the full year (required for the drawing tools plotting)
+    # Apply the actual date range specified, as opposed to the full year 
+    # (required for the drawing tools plotting)
     masked_collection = masked_collection.filterDate(date_range.get('start'), date_range.get('end'))
 
     bs_collection = bs_collection.filterDate(date_range.get('start'), date_range.get('end'))
@@ -230,7 +232,7 @@ def baresoil_collection(inshp, start_date='2021-01-01', end_date='2021-12-31',
                   
     # TODO Update! fine for now but perhaps improvable
     # Define a mask that categorizes pixels > 95% frequency as permanently bare,
-    # i.e. rocky outcrops and other bare surfaces that have little to no restoration potential
+    # i.e. rocky outcrops and other bare surfaces 
     bs_freq_mask = bs_freq.gt(0).And(bs_freq.lt(0.95))
 
     bs_freq = bs_freq.updateMask(bs_freq_mask)
@@ -1825,7 +1827,7 @@ def _doit(new, name):
     new['Date'] = pd.to_datetime(new['Date'])
     return new
 
-def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None,
+def plot_soil_fcover(df, group, index, veg='n-', year=None, title=None,
               fill=False, freq='M'):
     
     """
@@ -1842,12 +1844,9 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
           
     index: list
             the index of interest
-            
-    name: string
-            the name of interest
-            
-    crop: string
-            the crop of interest
+    
+    veg: string
+         the veg index keyword - eg 'f-' for fcover, 'n-' for ndvi
            
     legend_col: string
             the column that legend lines will be labeled by
@@ -1870,7 +1869,7 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
 
     #write plot only when bare soil occured and the coincident fcover
     b = df.filter(regex='g-')
-    n = df.filter(regex='f-')
+    n = df.filter(regex=veg)
 
     # subset
     sub = b[b.values==1]
@@ -1878,18 +1877,18 @@ def plot_soil_fcover(df, group, index, name, crop="SP BA", year=None, title=None
     bsub = b[b.values==1]
     nsub = n.iloc[sub.index.tolist()]
     
-    yrcols = [y for y in bsub.columns if 'g-' in y]
+    yrcols = [y for y in bsub.columns if veg in y]
     
     slnew = bsub.transpose()
     new = nsub.transpose()
     
-    new = _doit(new, "f-")
+    new = _doit(new, veg)
     slnew = _doit(slnew, "g-")
 
             
     # TODO - this is crap really needs replaced....
 
-    new = _doit(new, "f-")
+    new = _doit(new, veg)
     slnew = _doit(slnew, "g-")
         
     # else:
@@ -2242,6 +2241,86 @@ def S1_ts(inshp, start_date='2016-01-01', reproj=False,
         newdf.to_file(outfile)
     
     return newdf
+
+def bs_down(poly, sd, ed, name):
+    
+    """
+    Download baresoil time series to google drive
+    
+    Parameters
+    ----------
+    
+    poly: string, ee geometry or json
+         input polygon delimiting area of interest
+    
+    sd: string
+        start date 'YY-MM-DD'
+    
+    ed: string
+        end date 'YY-MM-DD'
+    
+    name: string
+          file name
+    
+    """
+    
+    bs_m, bs_c, bs_freq = et.baresoil_collection(poly, start_date=sd,
+                                                 end_date=ed,
+                                                 band_list=['fcover'])
+                                                 
+    ts = wxee.TimeSeries(bs_m).select(['GEOS3'])
+    
+    # this must be maximum to retain the baresoil binary values
+    # this does render the fcover pointless as you need the average of that
+    bscoll = ts.aggregate_time(frequency='month', reducer=ee.Reducer.max())
+    
+    # so can do image collection to bands
+    bsimg = bscoll.toBands()
+    
+    geemap.ee_export_image_to_drive(bsimg,
+                                    description=name, folder='export',
+                                    region=poly, scale=20)
+
+def nd_down(poly, sd, ed, name, index='NDVI', freq='month', scale=20):
+    
+    """
+    Download spectral index time series to google drive from S2
+    The result will have undergone harmonic smoothing
+    
+    Parameters
+    ----------
+    
+    poly: string, ee geometry or json
+         input polygon delimiting area of interest
+    
+    sd: string
+        start date 'YY-MM-DD'
+    
+    ed: string
+        end date 'YY-MM-DD'
+    
+    name: string
+          file name
+    
+    index: string
+           spectral index
+    
+    freq: string
+          eg month
+
+    scale: int
+           pixel resolution
+      
+    """
+    
+    collection = et.s2collection_ts(sd, ed, poly, cloud_filter=60, 
+                             band=index, agg=freq)
+    
+    ndimg = collection.toBands()
+    
+    geemap.ee_export_image_to_drive(ndimg,
+                                    description=name, folder='export',
+                                    region=poly, scale=scale)
 
 
 def S2ts_eemont(inshp, start_date='2020-01-01', end_date='2021-01-01', 
